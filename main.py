@@ -8,11 +8,13 @@ if not api_key:
 client = OpenAI(api_key=api_key)
 
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-5.2",
     messages=[
         {"role": "user", "content": "2 + 2"}
     ]
 )
 
 print(response.choices[0].message.content)
+
+
 
