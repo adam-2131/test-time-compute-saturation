@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.cache/
+.env
+.env.*
+
+.venv/
+venv/
+ENV/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Generated results (keep curated results tracked, ignore the live append-only log)
+results/scaling_results.csv
+

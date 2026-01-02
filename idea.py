@@ -1,21 +1,23 @@
-from pydantic import BaseModel
-from utils import sample
-from textwrap import dedent
+from __future__ import annotations
+
 import random
+from textwrap import dedent
+
+from pydantic import BaseModel
+from termcolor import cprint
 from tqdm import trange
 
-from termcolor import cprint
+from utils import sample
+
 
 class Idea:
-
-
-    def generate_seed(self) -> str:
+    def generate_seed(self):
         raise NotImplementedError("Subclasses must implement this method")
 
-    def generate_idea(self) -> str:
+    def generate_idea(self, *args, **kwargs):
         raise NotImplementedError("Subclasses must implement this method")
 
-    def evaluate_idea(self) -> float:
+    def evaluate_idea(self, *args, **kwargs):
         raise NotImplementedError("Subclasses must implement this method")
 
 
@@ -60,23 +62,30 @@ class DALYIdea(Idea):
         return sample(prompt, IsCorrect)
 
 
-def main():
+def main() -> None:
+    """
+    Small demo of Pydantic-validated structured sampling for idea generation.
+
+    Note: this is *not* used by the math scaling experiments in `main.py`.
+    """
     idea = DALYIdea()
     seeds = idea.generate_seed().approaches
-    cprint(f"Seeds: {seeds}", "green")
-    
-    approaches = []
-    is_valid = []    
-    for _ in trange(3):
-        # get random set of 3 seeds
+    cprint(f"Generated {len(seeds)} seed approaches.", "green")
+
+    for i in trange(3, desc="Generating ideas"):
         random_approaches = random.sample(seeds, 3)
         approach = idea.generate_idea(random_approaches)
-        approaches.append(approach)
-        is_valid.append(idea.evaluate_approach(approach))
-
-    import ipdb
-    ipdb.set_trace()
-    pass
+        verdict = idea.evaluate_approach(approach)
+        cprint(f"\n=== Idea {i + 1} ===", "cyan")
+        if hasattr(approach, "model_dump_json"):
+            print(approach.model_dump_json(indent=2))  # pydantic v2
+        else:
+            print(approach.json(indent=2))  # pydantic v1
+        cprint("\n--- Feasibility check ---", "cyan")
+        if hasattr(verdict, "model_dump_json"):
+            print(verdict.model_dump_json(indent=2))  # pydantic v2
+        else:
+            print(verdict.json(indent=2))  # pydantic v1
 
 if __name__ == "__main__":
     main()
