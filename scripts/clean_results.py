@@ -4,30 +4,58 @@ import re
 
 TARGET_HEADER = (
     "run_id,date,model,dataset,method,compute_multiplier,accuracy,"
-    "total_decoded_tokens,num_problems,notes"
+    "pass_at_k_accuracy,majority_vote_accuracy,"
+    "total_decoded_tokens,total_completion_tokens_used,total_tokens_used,"
+    "num_problems,notes"
 )
 
 OLD_HEADER_NO_RUN_ID = (
     "date,model,dataset,method,compute_multiplier,accuracy,"
-    "total_decoded_tokens,num_problems,notes"
+    "pass_at_k_accuracy,majority_vote_accuracy,"
+    "total_decoded_tokens,total_completion_tokens_used,total_tokens_used,"
+    "num_problems,notes"
 )
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _normalize_fields(fields: list[str]) -> tuple[str, str, str, str, str, str, str, str, str, str] | None:
+def _normalize_fields(fields: list[str]) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str] | None:
     # Some lines may have an extra leading comma or missing run_id.
     # If a line has 11 fields with an empty first field, drop the empty field.
-    if len(fields) == 11 and fields[0] == "":
+    if len(fields) in {11, 13} and fields[0] == "":
         fields = fields[1:]
 
-    # After normalization, we ONLY accept exactly 10 fields.
-    if len(fields) != 10:
+    # Legacy rows have 10 fields (no extra accuracies, no total_* columns).
+    # Older rows have 12 fields (no extra accuracies, but include total_* columns).
+    # New rows have 14 fields.
+    if len(fields) == 10:
+        # run_id,date,model,dataset,method,compute_multiplier,accuracy,total_decoded_tokens,num_problems,notes
+        # -> insert blanks for pass@k/majority after accuracy and for total_* after total_decoded_tokens
+        fields = fields[:7] + ["", ""] + [fields[7]] + ["", ""] + fields[8:]
+    elif len(fields) == 12:
+        # run_id,date,model,dataset,method,compute_multiplier,accuracy,total_decoded_tokens,total_completion_tokens_used,total_tokens_used,num_problems,notes
+        # -> insert blanks for pass@k/majority after accuracy
+        fields = fields[:7] + ["", ""] + fields[7:]
+    if len(fields) != 14:
         return None
 
     run_id = fields[0]  # may be empty => backfilled later
     rest = fields[1:]
-    date, model, dataset, method, compute_multiplier, accuracy, total_decoded_tokens, num_problems, notes = rest
+    (
+        date,
+        model,
+        dataset,
+        method,
+        compute_multiplier,
+        accuracy,
+        pass_at_k_accuracy,
+        majority_vote_accuracy,
+        total_decoded_tokens,
+        total_completion_tokens_used,
+        total_tokens_used,
+        num_problems,
+        notes,
+    ) = rest
     return (
         run_id,
         date,
@@ -36,7 +64,11 @@ def _normalize_fields(fields: list[str]) -> tuple[str, str, str, str, str, str, 
         method,
         compute_multiplier,
         accuracy,
+        pass_at_k_accuracy,
+        majority_vote_accuracy,
         total_decoded_tokens,
+        total_completion_tokens_used,
+        total_tokens_used,
         num_problems,
         notes,
     )
@@ -76,7 +108,11 @@ def main() -> None:
                 method,
                 compute_multiplier,
                 accuracy,
+                pass_at_k_accuracy,
+                majority_vote_accuracy,
                 total_decoded_tokens,
+                total_completion_tokens_used,
+                total_tokens_used,
                 num_problems,
                 notes,
             ) = normalized
@@ -96,12 +132,20 @@ def main() -> None:
             try:
                 int(compute_multiplier)
                 int(total_decoded_tokens)
+                if total_completion_tokens_used:
+                    int(total_completion_tokens_used)
+                if total_tokens_used:
+                    int(total_tokens_used)
                 int(num_problems)
             except ValueError:
                 continue
 
             try:
                 float(accuracy)
+                if pass_at_k_accuracy:
+                    float(pass_at_k_accuracy)
+                if majority_vote_accuracy:
+                    float(majority_vote_accuracy)
             except ValueError:
                 continue
 
@@ -114,7 +158,11 @@ def main() -> None:
                     method,
                     compute_multiplier,
                     accuracy,
+                    pass_at_k_accuracy,
+                    majority_vote_accuracy,
                     total_decoded_tokens,
+                    total_completion_tokens_used,
+                    total_tokens_used,
                     num_problems,
                     notes,
                 ]

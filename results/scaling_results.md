@@ -99,3 +99,18 @@ On a larger AIME subset (50 problems), uniform best-of-N exhibits **clear dimini
 - No measurable improvement from 10× → 100× compute under fixed token budgets.
 
 This confirms that the plateau observed on subset=10 is **not an artifact of extremely small sample size**, and motivates exploration of adaptive test-time compute allocation strategies.
+
+
+## AIME Scaling Results (subset = 100)
+
+| Method                    | Compute | Accuracy (range across seeds) |
+|---------------------------|---------|--------------------------------|
+| uniform best-of-N         | 10×     | ~0.22                          |
+| uniform best-of-N         | 100×    | ~0.22                          |
+| two-stage self-consistency (R=2) | 10×     | 0.22 – 0.25                    |
+| two-stage self-consistency (R=2) | 100×    | 0.22 – 0.25                    |
+
+Notes:
+- All runs use identical per-problem decoded-token budgets.
+- No consistent accuracy improvement is observed from 10× to 100× compute.
+- Adaptive allocation via this two-stage self-consistency procedure does not outperform uniform sampling.

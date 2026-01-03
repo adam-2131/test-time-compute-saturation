@@ -101,3 +101,60 @@ Result:
 - Confirms that test-time compute materially improves performance on hard math,
   and that diminishing returns appear early on small subsets.
 - Early AIME-labeled runs using toy data were excluded from analysis.
+
+### 2026-01-03 — Variance-reduced AIME scaling on subset=50
+
+Change:
+- Ran uniform_best_of_n_budgeted on AIME-style dataset with subset=50.
+- Evaluated compute multipliers {1×, 10×, 100×} under fixed token budgets.
+- Ensured all multipliers were logged within a single experimental sweep.
+- Verified decoded-token accounting on non-toy data.
+
+Reason:
+- Reduce variance relative to earlier subset=10 experiments.
+- Test whether the observed 10× → 100× accuracy plateau persists at larger n.
+
+Expectation:
+- Accuracy should improve from 1× to 10×.
+- If diminishing returns are real, gains from 10× to 100× should be minimal.
+
+Result:
+- 1× compute: accuracy = 0.20, total decoded tokens ≈ 21k.
+- 10× compute: accuracy = 0.26, total decoded tokens ≈ 476k.
+- 100× compute: accuracy = 0.26, total decoded tokens ≈ 5.0M.
+- Token usage scales approximately linearly with compute multiplier.
+- No accuracy improvement observed from 10× to 100×.
+
+Conclusion:
+- Diminishing returns in uniform best-of-N persist on subset=50.
+- The plateau is unlikely to be solely due to small-sample variance.
+- This establishes a stable baseline against which adaptive test-time
+  compute allocation methods can be meaningfully evaluated.
+
+
+
+### 2026-01-03 — Final scaling validation on AIME (subset=100)
+
+Change:
+- Ran uniform_best_of_n_budgeted and two_stage_self_consistency (alias: successive_halving_budgeted) on AIME-style dataset with subset=100.
+- Evaluated compute multipliers {10×, 100×} under fixed, deterministic token budgets.
+- Used multiple seeds to assess variance.
+
+Reason:
+- Confirm whether diminishing returns and the null result for adaptive allocation
+  persist at larger problem counts.
+
+Result:
+- Uniform best-of-N:
+  - 10× accuracy ≈ 0.22
+  - 100× accuracy ≈ 0.22
+- Two-stage self-consistency:
+  - Accuracy ranged from 0.22 to 0.25 across seeds.
+  - No consistent improvement over uniform sampling.
+- Token usage matched across methods to within ~0.1%.
+
+Conclusion:
+- Diminishing returns from 10× → 100× test-time compute persist at subset=100.
+- Simple 2-round two-stage self-consistency does not reliably outperform uniform best-of-N
+  under fixed decoded-token budgets.
+- Core experimental question is now resolved; further scaling unlikely to change conclusions.

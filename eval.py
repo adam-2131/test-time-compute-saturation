@@ -8,39 +8,70 @@ def run_best_of_n_with_budget(problems, model, temperature, max_tokens, budget_t
     results = []
 
     for p in problems:
+        prompt = format_math_prompt(p["problem"])
         samples_taken = 0
         decoded_tokens = 0
-        passed = False
+        total_completion_tokens_used = 0
+        total_tokens_used = 0
+        passed = False  # pass@k (any correct among accepted samples)
+        answers: list[str | None] = []
+        total_calls = 0
+        cap_hit_calls = 0
 
         while True:
             if decoded_tokens >= budget_tokens:
                 break
 
             out = call_model(
-                format_math_prompt(p["problem"]),
+                prompt,
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 seed=seed,
+                cache_salt=(samples_taken if temperature != 0.0 else None),
             )
+            total_calls += 1
 
-            used = out.completion_tokens or 0
-            if decoded_tokens + used > budget_tokens:
+            ctoks = out.completion_tokens or 0
+            ptoks = out.prompt_tokens or 0
+            ttoks = out.total_tokens
+            if ttoks is None:
+                ttoks = ptoks + ctoks
+            if ctoks == max_tokens:
+                cap_hit_calls += 1
+
+            # Preserve existing budgeting logic: budget is completion tokens only.
+            if decoded_tokens + ctoks > budget_tokens:
                 break
 
-            decoded_tokens += used
+            decoded_tokens += ctoks
+            total_completion_tokens_used += ctoks
+            total_tokens_used += ttoks
             samples_taken += 1
 
             pred = extract_final_answer(out.text)
+            answers.append(pred)
             if pred == p["answer"]:
                 passed = True
+
+        valid_answers = [a for a in answers if a is not None]
+        majority_correct = False
+        if valid_answers:
+            majority_answer = Counter(valid_answers).most_common(1)[0][0]
+            majority_correct = (majority_answer == p["answer"])
 
         results.append(
             {
                 "id": p["id"],
                 "samples_taken": samples_taken,
                 "decoded_tokens": decoded_tokens,
+                "total_completion_tokens_used": total_completion_tokens_used,
+                "total_tokens_used": total_tokens_used,
                 "pass": passed,
+                "pass_at_k": passed,
+                "majority_correct": majority_correct,
+                "total_calls": total_calls,
+                "cap_hit_calls": cap_hit_calls,
             }
         )
 
@@ -48,21 +79,22 @@ def run_best_of_n_with_budget(problems, model, temperature, max_tokens, budget_t
 
 
 # =============================================================================
-# Successive Halving (R=2 rounds, fixed N=16, K=4)
+# Two-stage self-consistency (NOT trace-continuation successive halving)
+#   R=2 rounds, fixed N=16, K=4
 # =============================================================================
 # Algorithm:
 #   Round 1: generate N samples with short max_tokens = floor(0.25*B / N)
 #            Score each by answer frequency (self-consistency).
 #            Select K survivors from most frequent answer groups.
-#   Round 2: generate K fresh samples with max_tokens = floor((B - round1_tokens) / K)
-#            Final answer = majority vote across K round-2 answers.
+#   Round 2: generate (possibly multiple batches of) K fresh samples with max_tokens = max_tokens_cap
+#            Final answer = majority vote across round-2 answers.
 
 
 def run_successive_halving_with_budget(
     problems, model, temperature, max_tokens_cap, budget_tokens, *, N=16, K=4, seed=None
 ):
     """
-    Successive halving with R=2 rounds.
+    Two-stage self-consistency with R=2 rounds (no trace continuation).
     
     Args:
         problems: list of problem dicts with "id", "problem", "answer"
@@ -98,7 +130,7 @@ def run_successive_halving_with_budget(
 def _successive_halving_one_problem(
     *, problem, model, temperature, max_tokens_cap, budget, N, K, seed=None
 ):
-    """Run successive halving on a single problem.
+    """Run two-stage self-consistency on a single problem.
     
     Budget accounting:
     - Round 1 gets 25% of budget B, split across N samples
@@ -117,6 +149,11 @@ def _successive_halving_one_problem(
     # Round 1: generate N samples
     round1_samples = []
     spent = 0  # Track actual decoded tokens
+    total_tokens_used = 0
+    draw_idx = 0
+    all_answers: list[str | None] = []
+    total_calls = 0
+    cap_hit_calls = 0
 
     for i in range(N):
         out = call_model(
@@ -125,16 +162,28 @@ def _successive_halving_one_problem(
             temperature=temperature,
             max_tokens=round1_max_tokens,
             seed=seed,
+            cache_salt=(draw_idx if temperature != 0.0 else None),
         )
-        used = out.completion_tokens or 0
-        spent += used
+        total_calls += 1
+        draw_idx += 1
+        ctoks = out.completion_tokens or 0
+        ptoks = out.prompt_tokens or 0
+        ttoks = out.total_tokens
+        if ttoks is None:
+            ttoks = ptoks + ctoks
+        if ctoks == round1_max_tokens:
+            cap_hit_calls += 1
+
+        spent += ctoks
+        total_tokens_used += ttoks
 
         answer = extract_final_answer(out.text)
+        all_answers.append(answer)
         round1_samples.append({
             "index": i,
             "text": out.text,
             "answer": answer,
-            "tokens": used,
+            "tokens": ctoks,
         })
 
     # Score by answer frequency (self-consistency)
@@ -172,6 +221,7 @@ def _successive_halving_one_problem(
         # Generate K samples in this batch
         batch_answers = []
         batch_spent = 0
+        batch_total_tokens = 0
         
         for _ in range(K):
             # Pre-check: stop if budget would be exceeded
@@ -184,19 +234,31 @@ def _successive_halving_one_problem(
                 temperature=temperature,
                 max_tokens=round2_max_tokens,
                 seed=seed,
+                cache_salt=(draw_idx if temperature != 0.0 else None),
             )
-            used = out.completion_tokens or 0
+            total_calls += 1
+            draw_idx += 1
+            ctoks = out.completion_tokens or 0
+            ptoks = out.prompt_tokens or 0
+            ttoks = out.total_tokens
+            if ttoks is None:
+                ttoks = ptoks + ctoks
+            if ctoks == round2_max_tokens:
+                cap_hit_calls += 1
             
             # Post-check: don't count if it would exceed budget
-            if spent + batch_spent + used > budget:
+            if spent + batch_spent + ctoks > budget:
                 break
             
-            batch_spent += used
+            batch_spent += ctoks
+            batch_total_tokens += ttoks
             answer = extract_final_answer(out.text)
             batch_answers.append(answer)
+            all_answers.append(answer)
             round2_samples_taken += 1
         
         spent += batch_spent
+        total_tokens_used += batch_total_tokens
         round2_answers.extend(batch_answers)
         
         # If we couldn't complete a full batch, stop
@@ -221,6 +283,7 @@ def _successive_halving_one_problem(
 
     total_samples = N + round2_samples_taken
     passed = (final_answer == gold_answer)
+    pass_at_k = any(a == gold_answer for a in all_answers if a is not None)
 
     # Assertion: spent should not exceed budget + small slack (allow 10 tokens slack)
     assert spent <= budget + 10, (
@@ -231,6 +294,12 @@ def _successive_halving_one_problem(
         "id": problem["id"],
         "samples_taken": total_samples,
         "decoded_tokens": spent,
+        "total_completion_tokens_used": spent,
+        "total_tokens_used": total_tokens_used,
         "pass": passed,
+        "pass_at_k": pass_at_k,
+        "majority_correct": passed,
+        "total_calls": total_calls,
+        "cap_hit_calls": cap_hit_calls,
     }
 

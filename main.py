@@ -1,5 +1,7 @@
 # main.py
 import argparse
+import json
+import os
 import random
 from pathlib import Path
 
@@ -19,7 +21,7 @@ DEFAULT_SEED = 0
 # For multiplier m, budget_tokens = m * BASE_BUDGET_TOKENS
 BASE_BUDGET_TOKENS = 1004
 
-# Successive halving hyperparameters (fixed for now)
+# Two-stage self-consistency hyperparameters (fixed for now)
 SH_N = 16  # initial samples
 SH_K = 4   # survivors
 
@@ -40,6 +42,11 @@ def _parse_multipliers(s: str) -> list[int]:
 
 def run(*, dataset_path: str, dataset_name: str, limit: int | None, multipliers: list[int], method: str, seed: int, debug_budget: bool = False):
     problems = load_frontier_math(dataset_path)
+    # Backward-compatible alias: this implementation is NOT trace-continuation successive halving.
+    # It is a two-stage self-consistency style procedure (round-1 vote to select survivors; round-2 resampling + vote).
+    if method == "successive_halving_budgeted":
+        method = "two_stage_self_consistency"
+
     if limit is not None:
         problems = problems[:limit]
     if not problems:
@@ -55,6 +62,8 @@ def run(*, dataset_path: str, dataset_name: str, limit: int | None, multipliers:
 
     # Get run_id once for the entire sweep (all multipliers share same run_id)
     run_id = get_run_id()
+    os.makedirs("results", exist_ok=True)
+    per_problem_path = os.path.join("results", "per_problem_results.jsonl")
 
     rows = []
 
@@ -77,7 +86,7 @@ def run(*, dataset_path: str, dataset_name: str, limit: int | None, multipliers:
                 budget_tokens,
                 seed=seed,
             )
-        elif method == "successive_halving_budgeted":
+        elif method == "two_stage_self_consistency":
             results = run_successive_halving_with_budget(
                 problems,
                 MODEL,
@@ -92,8 +101,15 @@ def run(*, dataset_path: str, dataset_name: str, limit: int | None, multipliers:
             raise ValueError(f"Unknown method: {method}")
 
         accuracy = sum(1 for r in results if r["pass"]) / len(results)
+        pass_at_k_accuracy = sum(1 for r in results if r.get("pass_at_k", r["pass"])) / len(results)
+        majority_vote_accuracy = sum(1 for r in results if r.get("majority_correct", r["pass"])) / len(results)
         total_decoded_tokens_used = sum(r["decoded_tokens"] for r in results)
-        rows.append((m, accuracy, total_decoded_tokens_used))
+        total_completion_tokens_used = sum(r.get("total_completion_tokens_used", r["decoded_tokens"]) for r in results)
+        total_tokens_used = sum(r.get("total_tokens_used", 0) for r in results)
+        total_calls = sum(r.get("total_calls", 0) for r in results)
+        cap_hit_calls = sum(r.get("cap_hit_calls", 0) for r in results)
+        cap_hit_rate = (cap_hit_calls / total_calls) if total_calls else 0.0
+        rows.append((m, accuracy, pass_at_k_accuracy, majority_vote_accuracy, cap_hit_rate, total_decoded_tokens_used))
 
         # Enforce semantic separation:
         # - sanity_check ONLY for toy/debug runs with num_problems < 10
@@ -121,9 +137,12 @@ def run(*, dataset_path: str, dataset_name: str, limit: int | None, multipliers:
         # Add seed to notes for all methods
         notes = f"{notes} seed={seed}"
         
-        # For successive_halving_budgeted, add additional hyperparameters to notes
-        if method == "successive_halving_budgeted":
+        # For two_stage_self_consistency, add additional hyperparameters to notes
+        if method == "two_stage_self_consistency":
             notes = f"{notes} rounds=2 N={SH_N} K={SH_K}"
+
+        # Diagnostics: how often completions hit the max_tokens cap (per-call, across the run).
+        notes = f"{notes} cap_hit_rate={cap_hit_rate:.4f} cap_hits={cap_hit_calls} calls={total_calls}"
 
         append_result_row(
             model=MODEL,
@@ -131,18 +150,45 @@ def run(*, dataset_path: str, dataset_name: str, limit: int | None, multipliers:
             method=method,
             compute_multiplier=m,
             accuracy=accuracy,
+            pass_at_k_accuracy=pass_at_k_accuracy,
+            majority_vote_accuracy=majority_vote_accuracy,
             total_decoded_tokens=total_decoded_tokens_used,
+            total_completion_tokens_used=total_completion_tokens_used,
+            total_tokens_used=total_tokens_used,
             num_problems=len(problems),
             notes=notes,
             run_id=run_id,
         )
 
-    header = f"{'multiplier':>10}  {'accuracy':>10}  {'total_decoded_tokens_used':>25}"
+        # Per-problem artifact for post-hoc stats (no new model calls).
+        # One JSONL line per (run_id, multiplier).
+        per_problem = {
+            "run_id": run_id,
+            "model": MODEL,
+            "dataset": dataset_name,
+            "method": method,
+            "seed": seed,
+            "compute_multiplier": m,
+            "num_problems": len(results),
+            # Method-dependent correctness (matches CSV "accuracy" semantics).
+            "per_problem_correct": [bool(r.get("pass", False)) for r in results],
+            # Also store both metrics for optional analysis.
+            "per_problem_pass_at_k": [bool(r.get("pass_at_k", r.get("pass", False))) for r in results],
+            "per_problem_majority_correct": [bool(r.get("majority_correct", r.get("pass", False))) for r in results],
+        }
+        with open(per_problem_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(per_problem, ensure_ascii=False) + "\n")
+
+    header = (
+        f"{'multiplier':>10}  {'accuracy':>10}  {'pass@k':>10}  {'majority':>10}  {'cap_hit':>10}  "
+        f"{'total_decoded_tokens_used':>25}"
+    )
     print(f"Method: {method}")
     print(header)
     print("-" * len(header))
-    for m, acc, toks in rows:
-        print(f"{m:>10}  {acc:>10.4f}  {toks:>25}")
+    # Note: 'accuracy' remains method-dependent (uniform=pass@k, successive=majority).
+    for m, acc, pass_k, maj, cap_hit, toks in rows:
+        print(f"{m:>10}  {acc:>10.4f}  {pass_k:>10.4f}  {maj:>10.4f}  {cap_hit:>10.4f}  {toks:>25}")
 
 
 if __name__ == "__main__":
@@ -154,8 +200,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--method",
         default=DEFAULT_METHOD,
-        choices=["uniform_best_of_n_budgeted", "successive_halving_budgeted"],
-        help="Evaluation method to use",
+        choices=["uniform_best_of_n_budgeted", "two_stage_self_consistency", "successive_halving_budgeted"],
+        help="Evaluation method to use (successive_halving_budgeted is an alias)",
     )
     parser.add_argument(
         "--seed",

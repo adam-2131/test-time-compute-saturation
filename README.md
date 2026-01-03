@@ -69,6 +69,61 @@ If you swap in a real dataset, keep the same keys (`id`, `problem`, `answer`).
 python scripts/clean_results.py
 ```
 
+- **Bootstrap CIs (no new model calls)**: after running `main.py` at least once, compute bootstrap 95% CIs over problems from `results/per_problem_results.jsonl`:
+
+```bash
+python scripts/bootstrap_ci.py
+```
+
+- **Answer extraction audit (no new model calls)**: sample cached model outputs and export a CSV for manual annotation:
+
+```bash
+python scripts/audit_extraction.py --n 50
+```
+
+## Reproducibility
+
+### Run the main experiments
+
+Uniform sampling (budgeted best-of-N):
+
+```bash
+python main.py --dataset-path data/aime.jsonl --dataset-name aime --limit 50 --multipliers 1,10,100 --method uniform_best_of_n_budgeted --seed 0
+```
+
+Two-stage self-consistency (alias: `successive_halving_budgeted`):
+
+```bash
+python main.py --dataset-path data/aime.jsonl --dataset-name aime --limit 50 --multipliers 1,10,100 --method two_stage_self_consistency --seed 0
+```
+
+To verify the exact per-problem budgets used:
+
+```bash
+python main.py --debug-budget --dataset-path data/aime.jsonl --dataset-name aime --limit 50 --multipliers 1,10,100 --method uniform_best_of_n_budgeted --seed 0
+```
+
+### How compute budgets are defined
+
+- **Budget unit**: decoded **completion tokens**.
+- **Per-problem budget**: `budget_tokens = compute_multiplier * BASE_BUDGET_TOKENS` (see `main.py`; current default `BASE_BUDGET_TOKENS = 1004`).
+- **Budget enforcement**: evaluation loops stop sampling when adding the next completion would exceed `budget_tokens` (logging also tracks total tokens separately).
+
+### Regenerate tables / artifacts (no new model calls)
+
+- **Clean / rebuild CSVs** (for plotting/reporting):
+
+```bash
+python scripts/clean_results.py
+python scripts/rebuild_scaling_results.py
+```
+
+- **Bootstrap 95% CIs over problems** (writes `results/bootstrap_ci_<run_id>_<metric>.json`):
+
+```bash
+python scripts/bootstrap_ci.py --metric accuracy --diff 10,100 --n-bootstrap 10000 --seed 0
+```
+
 ## Repo layout
 
 - `main.py`: runs the budgeted best-of-n experiment and prints a small table.
@@ -82,5 +137,5 @@ python scripts/clean_results.py
 ## Notes / gotchas
 
 - This repo uses `openai`’s `chat.completions` API.
-- `utils.call_model()` caches by `(model, temperature, max_tokens, prompt)`. If you change prompts or params, you’ll get new cache entries.
+- `utils.call_model()` caches by `(model, temperature, max_tokens, prompt, seed)` (and optional `cache_salt`). If you change prompts or params, you’ll get new cache entries.
 - Answer extraction is intentionally minimal (`parse.py`); for harder datasets you may want to tighten normalization.

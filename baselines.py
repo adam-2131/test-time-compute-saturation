@@ -19,8 +19,15 @@ def greedy(problem: str, answer_key: str, *, model: str, max_tokens: int = 2048)
 
 def sample_n(problem: str, answer_key: str, *, model: str, n: int, temperature: float = 0.7, max_tokens: int = 2048) -> list[Sample]:
     samples: list[Sample] = []
-    for _ in range(n):
-        out = call_model(format_math_prompt(problem), model=model, temperature=temperature, max_tokens=max_tokens)
+    prompt = format_math_prompt(problem)
+    for i in range(n):
+        out = call_model(
+            prompt,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            cache_salt=(i if temperature != 0.0 else None),
+        )
         ans = extract_final_answer(out.text)
         ctoks = out.completion_tokens or 0
         samples.append(Sample(out.text, ans, ans == answer_key, ctoks))

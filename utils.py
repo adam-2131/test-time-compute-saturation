@@ -29,6 +29,7 @@ def call_model(
     temperature: float = 0.7,
     max_tokens: int = 2048,
     seed: int | None = None,
+    cache_salt: int | None = None,
 ) -> ModelOutput:
     """
     Single model call that returns:
@@ -37,6 +38,9 @@ def call_model(
     
     Args:
         seed: Optional seed for deterministic sampling (passed to OpenAI API)
+        cache_salt: Optional value included ONLY in the cache key. Useful for making
+            repeated samples with identical prompts independent without changing the
+            model-visible prompt/messages.
     """
     os.makedirs(".cache", exist_ok=True)
     cache_key_payload = {
@@ -46,6 +50,10 @@ def call_model(
         "prompt": prompt,
         "seed": seed,
     }
+    if cache_salt is not None:
+        # Important: do NOT include this in the prompt/messages; it is cache-only.
+        # Also, omit entirely when None to preserve legacy cache keys.
+        cache_key_payload["cache_salt"] = cache_salt
     cache_key_str = json.dumps(
         cache_key_payload,
         sort_keys=True,

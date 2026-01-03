@@ -4,7 +4,12 @@ import re
 from datetime import date, datetime
 from typing import Dict, List, Optional
 
-HEADER_STR = "run_id,date,model,dataset,method,compute_multiplier,accuracy,total_decoded_tokens,num_problems,notes"
+HEADER_STR = (
+    "run_id,date,model,dataset,method,compute_multiplier,accuracy,"
+    "pass_at_k_accuracy,majority_vote_accuracy,"
+    "total_decoded_tokens,total_completion_tokens_used,total_tokens_used,"
+    "num_problems,notes"
+)
 HEADER = HEADER_STR.split(",")
 
 
@@ -48,13 +53,32 @@ def _normalize_row_to_header(row: List[str]) -> Dict[str, str]:
     if row:
         row[0] = row[0].lstrip("\ufeff")
 
-    # If a legacy row is missing run_id (len == len(HEADER)-1), pad on the left.
-    if len(row) == len(HEADER) - 1:
+    # Handle known legacy schemas safely (we've inserted new columns in the middle over time).
+    #
+    # Legacy v0 (10 cols):
+    #   run_id,date,model,dataset,method,compute_multiplier,accuracy,total_decoded_tokens,num_problems,notes
+    # Legacy v1 (12 cols):
+    #   run_id,date,model,dataset,method,compute_multiplier,accuracy,total_decoded_tokens,total_completion_tokens_used,total_tokens_used,num_problems,notes
+    # Current (14 cols):
+    #   run_id,date,model,dataset,method,compute_multiplier,accuracy,pass_at_k_accuracy,majority_vote_accuracy,
+    #   total_decoded_tokens,total_completion_tokens_used,total_tokens_used,num_problems,notes
+
+    # Missing run_id variants (pad on the left first, based on legacy lengths).
+    if len(row) in {9, 11, 13}:
         row = [""] + row
-    # If it's too short, pad to full length (assume missing run_id + trailing cells).
+
+    # Expand legacy v0 (10 -> 14) by inserting blanks in the right places.
+    if len(row) == 10:
+        # Insert pass@k + majority after accuracy; and token totals after total_decoded_tokens.
+        row = row[:7] + ["", ""] + [row[7]] + ["", ""] + row[8:]
+
+    # Expand legacy v1 (12 -> 14) by inserting blanks after accuracy.
+    if len(row) == 12:
+        row = row[:7] + ["", ""] + row[7:]
+
+    # Final normalization: pad/truncate to match current schema.
     if len(row) < len(HEADER):
         row = row + [""] * (len(HEADER) - len(row))
-    # If it's too long, truncate to our schema.
     if len(row) > len(HEADER):
         row = row[: len(HEADER)]
 
@@ -143,6 +167,10 @@ def append_result_row(
     accuracy: float,
     total_decoded_tokens: int,
     num_problems: int,
+    pass_at_k_accuracy: float | None = None,
+    majority_vote_accuracy: float | None = None,
+    total_completion_tokens_used: int | None = None,
+    total_tokens_used: int | None = None,
     notes: str = "",
     run_id: Optional[str] = None,
 ) -> None:
@@ -165,13 +193,18 @@ def append_result_row(
         "method": method,
         "compute_multiplier": compute_multiplier,
         "accuracy": accuracy,
+        "pass_at_k_accuracy": pass_at_k_accuracy,
+        "majority_vote_accuracy": majority_vote_accuracy,
         "total_decoded_tokens": total_decoded_tokens,
+        "total_completion_tokens_used": total_completion_tokens_used,
+        "total_tokens_used": total_tokens_used,
         "num_problems": num_problems,
         "notes": notes,
     }
 
     # Defensive: ensure all required keys exist (and no unexpected schema changes slip in).
-    row = {k: row.get(k, "") for k in HEADER}
+    # Also normalize None -> "" so downstream scripts can keep parsing ints safely.
+    row = {k: ("" if row.get(k, "") is None else row.get(k, "")) for k in HEADER}
     if not row.get("run_id"):
         raise RuntimeError("Refusing to write results row with empty run_id")
 
