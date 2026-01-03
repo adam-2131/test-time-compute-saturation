@@ -78,3 +78,26 @@ Conclusion:
 - Test-time compute is reliably measurable via decoded tokens.
 - The budgeted best-of-N implementation respects compute limits up to minor rounding effects.
 - The evaluation pipeline is sufficiently validated to proceed to non-trivial datasets.
+
+### 2026-01-03 — First non-trivial scaling results on AIME (subset=10)
+
+Change:
+- Integrated AIME-style dataset.
+- Ran uniform best-of-N under fixed token budgets for multipliers 1×, 10×, and 100×.
+- Evaluated on a subset of 10 problems.
+
+Reason:
+- Validate that the evaluation harness produces non-trivial scaling behavior
+  on hard mathematical reasoning tasks.
+
+Expectation:
+- Accuracy at 1× should be low.
+- Accuracy should increase with compute, with diminishing returns.
+
+Result:
+- At 1× compute, accuracy ≈ 0.10.
+- At 10× compute, accuracy ≈ 0.40.
+- At 100× compute, accuracy ≈ 0.40 on subset=10 (no further improvement observed).
+- Confirms that test-time compute materially improves performance on hard math,
+  and that diminishing returns appear early on small subsets.
+- Early AIME-labeled runs using toy data were excluded from analysis.

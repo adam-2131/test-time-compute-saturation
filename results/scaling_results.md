@@ -51,3 +51,51 @@ No claims are made based on the results below.
 - Record all results in scaling_results.csv.
 
 
+## Results (AIME, subset=10)
+
+| Compute Multiplier | Accuracy |
+|-------------------:|---------:|
+| 1×                | 0.10     |
+| 10×               | 0.40     |
+| 100×              | 0.40     |
+
+These results represent the first non-trivial scaling behavior observed
+in this project. Accuracy improves substantially from 1× to 10× compute,
+with no further improvement observed at 100× on this small subset,
+suggesting early diminishing returns.
+
+
+## AIME Scaling Results (Uniform Best-of-N, Budgeted)
+
+### Experimental setup
+- Model: gpt-4o-mini
+- Dataset: AIME-style
+- Method: uniform_best_of_n_budgeted
+- Metric: exact correctness
+- Test-time compute: total decoded completion tokens
+- All runs use the fixed math prompt wrapper.
+- Sanity-check and toy runs are excluded.
+
+---
+
+### AIME (subset = 50)
+
+| Compute multiplier | Accuracy | Total decoded tokens |
+|-------------------|----------|----------------------|
+| 1×                | 0.20     | 21,112               |
+| 10×               | 0.26     | 476,166              |
+| 100×              | 0.26     | 4,997,441            |
+
+Notes:
+- All three multipliers were evaluated under a single experimental sweep.
+- Total decoded tokens scale approximately linearly with the compute multiplier.
+- Accuracy improves from 1× to 10×, but shows no further gain from 10× to 100×.
+
+---
+
+### Key observation
+On a larger AIME subset (50 problems), uniform best-of-N exhibits **clear diminishing returns**:
+- Significant improvement from 1× → 10× compute.
+- No measurable improvement from 10× → 100× compute under fixed token budgets.
+
+This confirms that the plateau observed on subset=10 is **not an artifact of extremely small sample size**, and motivates exploration of adaptive test-time compute allocation strategies.

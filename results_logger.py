@@ -23,6 +23,14 @@ def _generate_run_id(now: Optional[datetime] = None) -> str:
 _RUN_ID = _generate_run_id()
 
 
+def get_run_id() -> str:
+    """
+    Return the run_id for the current process/session.
+    This is used to ensure a single sweep (multiple multipliers) shares one run_id.
+    """
+    return _RUN_ID
+
+
 def _looks_like_header(row: List[str]) -> bool:
     if not row:
         return False
@@ -136,13 +144,14 @@ def append_result_row(
     total_decoded_tokens: int,
     num_problems: int,
     notes: str = "",
+    run_id: Optional[str] = None,
 ) -> None:
     os.makedirs("results", exist_ok=True)
 
     csv_path = os.path.join("results", "scaling_results.csv")
     _ensure_results_csv_schema(csv_path)
 
-    run_id = _RUN_ID if isinstance(_RUN_ID, str) and _RUN_ID else _generate_run_id()
+    run_id = run_id or (_RUN_ID if isinstance(_RUN_ID, str) and _RUN_ID else _generate_run_id())
     if not re.fullmatch(r"\d{8}-\d{6}", run_id):
         run_id = _generate_run_id()
     if not run_id:

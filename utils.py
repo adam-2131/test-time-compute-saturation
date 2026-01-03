@@ -8,7 +8,7 @@ import re
 import time
 from typing import Any, TypeVar
 
-from openai import OpenAI, RateLimitError
+from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError
 from pydantic import BaseModel
 
 @dataclass
@@ -28,11 +28,15 @@ def call_model(
     model: str = "gpt-4o-mini",
     temperature: float = 0.7,
     max_tokens: int = 2048,
+    seed: int | None = None,
 ) -> ModelOutput:
     """
     Single model call that returns:
     - generated text
     - token usage (needed for test-time compute accounting)
+    
+    Args:
+        seed: Optional seed for deterministic sampling (passed to OpenAI API)
     """
     os.makedirs(".cache", exist_ok=True)
     cache_key_payload = {
@@ -40,6 +44,7 @@ def call_model(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "prompt": prompt,
+        "seed": seed,
     }
     cache_key_str = json.dumps(
         cache_key_payload,
@@ -71,13 +76,22 @@ def call_model(
     max_attempts = 5
     while True:
         try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            api_kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if seed is not None:
+                api_kwargs["seed"] = seed
+            resp = client.chat.completions.create(**api_kwargs)
             break
+        except (APITimeoutError, APIConnectionError) as e:
+            attempts += 1
+            if attempts >= max_attempts:
+                raise
+            wait_s = min(2 ** attempts, 60)  # exponential backoff, max 60s
+            time.sleep(wait_s)
         except RateLimitError as e:
             attempts += 1
             msg = str(e)
