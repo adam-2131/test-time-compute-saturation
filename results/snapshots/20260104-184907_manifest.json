@@ -1,0 +1,24 @@
+{
+  "run_id": "20260104-184907",
+  "source_csv": "results\\scaling_results.csv",
+  "num_rows": 2,
+  "datasets": [
+    "aime"
+  ],
+  "methods": [
+    "uniform_best_of_n_budgeted"
+  ],
+  "outputs": {
+    "20260104-184907_scaling_results_snapshot.csv": {
+      "sha256": "f97f4e7bdd4b54df7f1a0d9a8c2cd957344e7f74c5db3ac059dc5ddc2598c0a2",
+      "bytes": 508,
+      "rows": 2
+    }
+  },
+  "inputs": {
+    "per_problem_results.jsonl": {
+      "sha256": "d970d466b0c8f436922190e928a942fe81e63412cb58a8562dd0c50b84915695",
+      "bytes": 6258
+    }
+  }
+}

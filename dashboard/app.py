@@ -37,22 +37,28 @@ def _as_str(x) -> str:
 
 st.sidebar.header("Scaling results source")
 
-# By default, show the canonical/curated file, but allow inspection of raw/clean artifacts too.
+# Prefer snapshots (committed evidence) and optionally allow inspecting local scaling_results.csv.
 available_sources = []
-for name in ["scaling_results.csv", "scaling_results_clean.csv", "scaling_results_raw.csv"]:
-    p = paths.results_dir / name
-    if p.exists():
-        available_sources.append(name)
+snapshots = sorted((paths.results_dir / "snapshots").glob("*_scaling_results_snapshot.csv")) if (paths.results_dir / "snapshots").exists() else []
+for p in snapshots:
+    available_sources.append(str(p.relative_to(paths.results_dir)).replace("\\", "/"))
+canonical = paths.results_dir / "scaling_results.csv"
+if canonical.exists():
+    available_sources.append("scaling_results.csv")
 
 if not available_sources:
-    st.error(f"No scaling results CSVs found under `{paths.results_dir}`.")
+    st.error(
+        "No scaling results sources found.\n\n"
+        "- Committed evidence: `results/snapshots/*_scaling_results_snapshot.csv`\n"
+        "- Optional local log: `results/scaling_results.csv` (gitignored)\n"
+    )
     st.stop()
 
 source_name = st.sidebar.selectbox(
     "Source file",
     options=available_sources,
-    index=available_sources.index("scaling_results.csv") if "scaling_results.csv" in available_sources else 0,
-    help="`scaling_results.csv` is the canonical output; `*_raw/clean` are optional helper artifacts.",
+    index=0,
+    help="Prefer snapshots for review. `results/scaling_results.csv` is a local (gitignored) append-only log.",
 )
 scaling_path = paths.results_dir / source_name
 
@@ -65,8 +71,8 @@ except Exception as e:
 if df.empty:
     st.warning(
         f"`{scaling_path.name}` has 0 rows. If you only ran toy/sanity checks, those may only appear in "
-        "`scaling_results_raw.csv`. For real runs, execute `python main.py ...` (with a real dataset / subset) "
-        "or rebuild the curated file via `python scripts/rebuild_scaling_results.py`."
+        "your local log. For real runs, execute `python main.py ...` (with a real dataset / subset) "
+        "and then commit evidence via `python scripts/make_snapshot.py`."
     )
 
 
@@ -276,7 +282,6 @@ with tab_a:
     # Table
     cols = [
         "compute_multiplier",
-        "accuracy",
         "pass_at_k_accuracy",
         "majority_vote_accuracy",
         "total_decoded_tokens",
@@ -287,7 +292,7 @@ with tab_a:
     out = out.sort_values(by=["compute_multiplier"], ascending=True, na_position="last")
     st.dataframe(out, use_container_width=True, hide_index=True)
 
-    st.caption("Note: accuracy may be method-dependent; pass@k and majority are logged separately.")
+    st.caption("Primary metric is pass@k (`pass_at_k_accuracy`). Majority vote is optional/secondary.")
 
 
 with tab_b:
@@ -406,10 +411,10 @@ with tab_fig:
             fig_acc = _plot_lines(
                 filt,
                 x_col="compute_multiplier",
-                y_cols=["accuracy", "pass_at_k_accuracy", "majority_vote_accuracy"],
-                title="Accuracy vs Compute Multiplier",
+                y_cols=["pass_at_k_accuracy", "majority_vote_accuracy"],
+                title="pass@k vs Compute Multiplier",
                 overlay_seeds=overlay_seeds,
-                ylabel="Accuracy",
+                ylabel="pass@k",
             )
             st.pyplot(fig_acc, use_container_width=True)
 
@@ -482,7 +487,7 @@ with tab_fig:
                         svg_path = safe_new_results_path(out_dir, base + ".svg")
                         fig.savefig(svg_path, bbox_inches="tight")
 
-                _save(fig_acc, "accuracy")
+                _save(fig_acc, "pass_at_k")
                 _save(fig_tok, "tokens")
                 if fig_cap is not None:
                     _save(fig_cap, "caphit")

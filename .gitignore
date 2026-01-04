@@ -2,14 +2,17 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Model response cache
 .cache/
+
+# Environment
 .env
 .env.*
-
 .venv/
 venv/
 ENV/
 
+# Linting/testing caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -18,33 +21,34 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Writing / build sources (generated locally; never committed)
+# =============================================================================
+# Results artifacts policy
+# =============================================================================
+# LOCAL (gitignored): generated at runtime, not committed
+results/scaling_results.csv
+results/per_problem_results.jsonl
+results/bootstrap_ci_*.json
+results/figures/
+results/report_bundle/
+
+# Committed: curated snapshots only
+results/snapshots/*
+!results/snapshots/.gitkeep
+!results/snapshots/*.csv
+!results/snapshots/*.json
+
+# Legacy raw/clean CSVs (local only; never commit)
+results/scaling_results_raw.csv
+results/scaling_results_clean.csv
+
+# =============================================================================
+# Writing / paper artifacts (deleted - do not recreate)
+# =============================================================================
 paper_src/
 paper/
 brief/
-
-# Final shareable artifacts: keep ONLY these two PDFs tracked
-dist/*
-!dist/Maturaarbeit_TestTimeCompute.pdf
-!dist/OnePager_TestTimeCompute.pdf
-
-# Generated report bundles / intermediate artifacts
-results/report_bundle/
-
-# Paper-ready exported figures (dashboard)
-results/figures/
-
-# Paper build artifacts
-paper/build/
-paper/*.aux
-paper/*.bbl
-paper/*.bcf
-paper/*.blg
-paper/*.log
-paper/*.out
-paper/*.run.xml
-paper/*.toc
+notes/
+dist/
 
 # Streamlit cache
 dashboard/.streamlit/
-

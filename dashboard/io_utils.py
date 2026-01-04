@@ -96,15 +96,15 @@ def load_scaling_results_csv(path: Path) -> pd.DataFrame:
     except ParserError:
         df = _load_scaling_results_csv_fallback(path)
 
-    # Ensure expected columns exist (legacy files may not have these).
-    expected = [
+    # Ensure expected columns exist (schema v2).
+    # Back-compat: if legacy "accuracy" exists, treat it as pass@k ONLY if pass_at_k_accuracy is missing/empty.
+    expected_v2 = [
         "run_id",
         "date",
         "model",
         "dataset",
         "method",
         "compute_multiplier",
-        "accuracy",
         "pass_at_k_accuracy",
         "majority_vote_accuracy",
         "total_decoded_tokens",
@@ -113,9 +113,12 @@ def load_scaling_results_csv(path: Path) -> pd.DataFrame:
         "num_problems",
         "notes",
     ]
-    for c in expected:
+    for c in expected_v2:
         if c not in df.columns:
             df[c] = ""
+    if "accuracy" in df.columns and ("pass_at_k_accuracy" not in df.columns or df["pass_at_k_accuracy"].astype(str).str.strip().eq("").all()):
+        # Legacy fallback mapping: do NOT surface as "accuracy" in UI.
+        df["pass_at_k_accuracy"] = df["accuracy"]
 
     # Parse numeric-ish columns.
     def _to_int(series: pd.Series) -> pd.Series:
@@ -125,7 +128,6 @@ def load_scaling_results_csv(path: Path) -> pd.DataFrame:
         return pd.to_numeric(series, errors="coerce")
 
     df["compute_multiplier"] = _to_int(df["compute_multiplier"])
-    df["accuracy"] = _to_float(df["accuracy"])
     df["pass_at_k_accuracy"] = _to_float(df["pass_at_k_accuracy"])
     df["majority_vote_accuracy"] = _to_float(df["majority_vote_accuracy"])
     df["total_decoded_tokens"] = _to_int(df["total_decoded_tokens"])
@@ -154,6 +156,8 @@ def _load_scaling_results_csv_fallback(path: Path) -> pd.DataFrame:
 
     Also handles occasional extra leading empty column (e.g., rows starting with ',<run_id>,...').
     """
+    # Fallback parser supports legacy schemas, but returns a schema-v2-ish frame
+    # where the primary metric column is pass_at_k_accuracy.
     expected = [
         "run_id",
         "date",
@@ -161,7 +165,6 @@ def _load_scaling_results_csv_fallback(path: Path) -> pd.DataFrame:
         "dataset",
         "method",
         "compute_multiplier",
-        "accuracy",
         "pass_at_k_accuracy",
         "majority_vote_accuracy",
         "total_decoded_tokens",
@@ -197,15 +200,24 @@ def _load_scaling_results_csv_fallback(path: Path) -> pd.DataFrame:
             if fields and _DATE_RE.match(fields[0]):
                 fields = [""] + fields
 
-            # Normalize schema lengths.
+            # Normalize schema lengths to legacy-14 first, then map to v2.
+            # Legacy v0 (10): ... ,accuracy,total_decoded_tokens,num_problems,notes
+            # Legacy v1 (12): ... ,accuracy,total_decoded_tokens,total_completion_tokens_used,total_tokens_used,num_problems,notes
+            # Legacy v2 (14): ... ,accuracy,pass_at_k_accuracy,majority_vote_accuracy,total_decoded_tokens,...
             if len(fields) == 10:
-                # Insert pass@k + majority after accuracy; and token totals after total_decoded_tokens.
                 fields = fields[:7] + ["", ""] + [fields[7]] + ["", ""] + fields[8:]
             elif len(fields) == 12:
-                # Insert pass@k + majority after accuracy.
                 fields = fields[:7] + ["", ""] + fields[7:]
 
-            # Best-effort pad/truncate to current schema.
+            # Now map legacy-14 -> v2-13 by dropping "accuracy" and preferring pass_at_k_accuracy.
+            if len(fields) == 14:
+                legacy_accuracy = fields[6]
+                legacy_passk = fields[7]
+                legacy_majority = fields[8]
+                final_passk = legacy_passk if legacy_passk else legacy_accuracy
+                fields = fields[:6] + [final_passk, legacy_majority] + fields[9:]
+
+            # Best-effort pad/truncate to v2 schema.
             if len(fields) < len(expected):
                 fields = fields + [""] * (len(expected) - len(fields))
             if len(fields) > len(expected):

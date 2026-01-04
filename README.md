@@ -1,20 +1,22 @@
 # Parallel-Sampling
 
-Small research codebase for **test-time compute** experiments: allocate a fixed **decoded-token budget** per problem, run repeated sampling, and measure **pass@k / accuracy vs compute**.
-
-This repo also includes a tiny demo of **Pydantic-validated structured sampling** (`idea.py`), but the main focus is the math scaling harness (`main.py`).
+Small research codebase for **test-time compute** experiments: allocate a fixed **decoded-token budget** per problem, run repeated sampling, and measure **pass@k accuracy vs compute**.
 
 ## What it does
 
 For each problem:
 
-- Run a **greedy baseline** (temperature 0) to estimate typical completion tokens.
-- Pick a compute multiplier \(m \in \{1,10,100,1000\}\) and define a per-problem budget:
-  - \( \text{budget_tokens} = m \times \text{baseline_avg_completion_tokens} \)
+- Define a per-problem budget in **decoded completion tokens**:
+  - `budget_tokens = multiplier × BASE_BUDGET_TOKENS` (fixed, no API jitter)
+  - Current default: `BASE_BUDGET_TOKENS = 1004`
 - Keep sampling solutions (temperature > 0) until the budget would be exceeded.
-- Mark the problem as **pass** if any sampled solution matches the gold answer after extraction.
+- **Primary metric (pass@k)**: Did any sampled solution match the gold answer?
+- **Secondary metric (majority vote)**: Did the majority answer match the gold answer?
 
-Results are appended to `results/scaling_results.csv` (ignored by git by default). Curated/sanity-check artifacts live in `results/`.
+## Results artifacts
+
+- **Local (gitignored)**: `results/scaling_results.csv` — generated at runtime
+- **Committed**: `results/snapshots/` — curated snapshots with manifest
 
 ## Quickstart
 
@@ -28,114 +30,134 @@ pip install -r requirements.txt
 
 ### 2) Set `OPENAI_API_KEY`
 
-- **macOS/Linux**:
+```bash
+export OPENAI_API_KEY="..."   # macOS/Linux
+$env:OPENAI_API_KEY="..."     # Windows PowerShell
+```
+
+### 3) Run an experiment
 
 ```bash
-export OPENAI_API_KEY="..."
+python main.py --dataset-path data/aime.jsonl --limit 50 --multipliers 1,10,100
 ```
 
-- **Windows PowerShell**:
-
-```powershell
-$env:OPENAI_API_KEY="..."
-```
-
-### 3) Run the scaling experiment
+### 4) Create a snapshot (for committing)
 
 ```bash
-python main.py
+python scripts/make_snapshot.py
 ```
 
-By default this runs on `data/frontier_math.jsonl`, which is currently a **toy placeholder dataset** (2 arithmetic problems) matching the “sanity check” writeup in `results/scaling_results.md`.
+## Methodology
 
-## Data format
+### Compute definition
 
-`data/frontier_math.jsonl` is JSONL with one object per line:
+- **Compute unit**: decoded **completion tokens** (not prompt tokens, not wall-clock time)
+- **Per-problem budget**: `budget_tokens = compute_multiplier × BASE_BUDGET_TOKENS`
+- **Budget enforcement**: sampling stops when adding next completion would exceed budget
 
-```json
-{"id":"0","problem":"...","answer":"..."}
+### Primary metric: pass_at_k_accuracy
+
+- **pass@k**: Did any of the k samples produce the correct answer?
+- This metric is **consistent across all methods** (uniform and two-phase)
+- The `pass_at_k_accuracy` column in results CSVs is the primary metric
+
+### Sampling independence
+
+Each model call uses a **derived seed** computed as:
+```python
+seed = int(sha256(f"{base_seed}|{problem_id}|{draw_idx}")[:8], 16)
 ```
+This ensures each draw is independent while remaining deterministic.
 
-If you swap in a real dataset, keep the same keys (`id`, `problem`, `answer`).
+### Methods
 
-## Outputs
+| Method | Description |
+|--------|-------------|
+| `uniform_best_of_n_budgeted` | Uniform sampling until budget exhausted |
+| `two_phase_budgeted_sampling` | Two-phase budget schedule (see below) |
 
-- **Caching**: model responses are cached in `.cache/` (ignored by git).
-- **Results log**: `results/scaling_results.csv` (auto-created, append-only).
-- **Curated artifacts**: `results/scaling_results.md`, `results/scaling_results_raw.csv`, `results/scaling_results_clean.csv`.
-  - To clean legacy/raw logs:
+### Two-phase budgeted sampling (NOT successive halving)
+
+This is a **budget schedule**, not adaptive allocation:
+
+1. **Round 1**: Generate N=16 short samples, score by answer frequency
+2. **Round 2**: Generate fresh samples until budget exhausted, majority vote
+
+**Important**: Round 2 does NOT continue from round 1 traces. There is no actual "halving" or trace continuation. This is simply a budget allocation schedule.
+
+Legacy aliases (emit warnings):
+- `successive_halving_budgeted` → `two_phase_budgeted_sampling`
+- `two_stage_self_consistency` → `two_phase_budgeted_sampling`
+
+### Limitations
+
+- **Extraction noise**: Answer parsing (`parse.py`) can introduce false negatives/positives
+- **Token cap hit rate**: When completions hit `max_tokens`, effective compute may differ from nominal budget
+- **Single model/prompt**: Results are specific to gpt-4o-mini and the prompt template
+- **Small subsets**: For small N, variance is high; bootstrap CIs help quantify uncertainty
+
+## Commands
+
+### Run experiments
 
 ```bash
-python scripts/clean_results.py
+# Uniform sampling
+python main.py --method uniform_best_of_n_budgeted --limit 50 --multipliers 1,10,100
+
+# Two-phase sampling
+python main.py --method two_phase_budgeted_sampling --limit 50 --multipliers 1,10,100
 ```
 
-- **Bootstrap CIs (no new model calls)**: after running `main.py` at least once, compute bootstrap 95% CIs over problems from `results/per_problem_results.jsonl`:
+### Post-hoc analysis (no new model calls)
 
 ```bash
-python scripts/bootstrap_ci.py
-```
+# Create snapshot for committing
+python scripts/make_snapshot.py
 
-- **Answer extraction audit (no new model calls)**: sample cached model outputs and export a CSV for manual annotation:
-
-```bash
-python scripts/audit_extraction.py --n 50
-```
-
-## Reproducibility
-
-### Run the main experiments
-
-Uniform sampling (budgeted best-of-N):
-
-```bash
-python main.py --dataset-path data/aime.jsonl --dataset-name aime --limit 50 --multipliers 1,10,100 --method uniform_best_of_n_budgeted --seed 0
-```
-
-Two-stage self-consistency (alias: `successive_halving_budgeted`):
-
-```bash
-python main.py --dataset-path data/aime.jsonl --dataset-name aime --limit 50 --multipliers 1,10,100 --method two_stage_self_consistency --seed 0
-```
-
-To verify the exact per-problem budgets used:
-
-```bash
-python main.py --debug-budget --dataset-path data/aime.jsonl --dataset-name aime --limit 50 --multipliers 1,10,100 --method uniform_best_of_n_budgeted --seed 0
-```
-
-### How compute budgets are defined
-
-- **Budget unit**: decoded **completion tokens**.
-- **Per-problem budget**: `budget_tokens = compute_multiplier * BASE_BUDGET_TOKENS` (see `main.py`; current default `BASE_BUDGET_TOKENS = 1004`).
-- **Budget enforcement**: evaluation loops stop sampling when adding the next completion would exceed `budget_tokens` (logging also tracks total tokens separately).
-
-### Regenerate tables / artifacts (no new model calls)
-
-- **Clean / rebuild CSVs** (for plotting/reporting):
-
-```bash
-python scripts/clean_results.py
+# Rebuild curated CSV from raw
 python scripts/rebuild_scaling_results.py
-```
 
-- **Bootstrap 95% CIs over problems** (writes `results/bootstrap_ci_<run_id>_<metric>.json`):
+# Bootstrap 95% CIs
+python scripts/bootstrap_ci.py --metric pass_at_k
 
-```bash
-python scripts/bootstrap_ci.py --metric accuracy --diff 10,100 --n-bootstrap 10000 --seed 0
+# Audit answer extraction
+python scripts/audit_extraction.py --n 50
 ```
 
 ## Repo layout
 
-- `main.py`: runs the budgeted best-of-n experiment and prints a small table.
-- `eval.py`: implements the per-problem sampling loop under a decoded-token budget.
-- `parse.py`: extracts “Final Answer: ...” / boxed answers from model text.
-- `prompting.py`: prompt formatting for math problems.
-- `results_logger.py`: appends rows and enforces a stable CSV schema.
-- `utils.py`: OpenAI call helper (`call_model`) + minimal Pydantic JSON sampling (`sample`).
-- `idea.py`: structured sampling demo (DALY idea generation).
+```
+├── main.py              # Experiment runner
+├── eval.py              # Per-problem sampling loops
+├── parse.py             # Answer extraction
+├── prompting.py         # Prompt formatting
+├── data.py              # JSONL loading
+├── results_logger.py    # CSV schema + logging
+├── utils.py             # OpenAI helper + caching
+├── data/                # JSONL datasets
+├── results/
+│   ├── snapshots/       # Committed artifacts (tracked)
+│   └── scaling_results.csv  # Local log (gitignored)
+├── scripts/
+│   ├── make_snapshot.py     # Create committed snapshot
+│   ├── rebuild_scaling_results.py
+│   ├── bootstrap_ci.py
+│   └── audit_extraction.py
+```
 
-## Notes / gotchas
+## CSV schema
 
-- This repo uses `openai`’s `chat.completions` API.
-- `utils.call_model()` caches by `(model, temperature, max_tokens, prompt, seed)` (and optional `cache_salt`). If you change prompts or params, you’ll get new cache entries.
-- Answer extraction is intentionally minimal (`parse.py`); for harder datasets you may want to tighten normalization.
+```
+run_id,date,model,dataset,method,compute_multiplier,
+pass_at_k_accuracy,majority_vote_accuracy,
+total_decoded_tokens,total_completion_tokens_used,total_tokens_used,
+num_problems,notes
+```
+
+Primary metric is `pass_at_k_accuracy`. No separate "accuracy" column.
+
+## Non-claims
+
+- No claim of general scaling laws
+- No claim that two-phase sampling is superior to uniform
+- Results are empirical observations for this specific setup
