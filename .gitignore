@@ -18,6 +18,33 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Generated results (keep curated results tracked, ignore the live append-only log)
-results/scaling_results.csv
+# Writing / build sources (generated locally; never committed)
+paper_src/
+paper/
+brief/
+
+# Final shareable artifacts: keep ONLY these two PDFs tracked
+dist/*
+!dist/Maturaarbeit_TestTimeCompute.pdf
+!dist/OnePager_TestTimeCompute.pdf
+
+# Generated report bundles / intermediate artifacts
+results/report_bundle/
+
+# Paper-ready exported figures (dashboard)
+results/figures/
+
+# Paper build artifacts
+paper/build/
+paper/*.aux
+paper/*.bbl
+paper/*.bcf
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.run.xml
+paper/*.toc
+
+# Streamlit cache
+dashboard/.streamlit/
 
