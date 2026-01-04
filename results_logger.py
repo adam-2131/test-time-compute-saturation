@@ -1,16 +1,33 @@
+"""
+Results logging utilities for test-time compute experiments.
+
+Schema (v2 - reviewer-safe):
+  - Removed redundant "accuracy" column (was duplicate of pass_at_k_accuracy)
+  - Primary metric: pass_at_k_accuracy
+  - Secondary metric: majority_vote_accuracy
+"""
 import csv
 import os
 import re
 from datetime import date, datetime
 from typing import Dict, List, Optional
 
+# Canonical schema (v2): no redundant "accuracy" column
 HEADER_STR = (
-    "run_id,date,model,dataset,method,compute_multiplier,accuracy,"
+    "run_id,date,model,dataset,method,compute_multiplier,"
     "pass_at_k_accuracy,majority_vote_accuracy,"
     "total_decoded_tokens,total_completion_tokens_used,total_tokens_used,"
     "num_problems,notes"
 )
 HEADER = HEADER_STR.split(",")
+
+# Legacy schema columns for migration
+LEGACY_ACCURACY_HEADER = [
+    "run_id", "date", "model", "dataset", "method", "compute_multiplier",
+    "accuracy", "pass_at_k_accuracy", "majority_vote_accuracy",
+    "total_decoded_tokens", "total_completion_tokens_used", "total_tokens_used",
+    "num_problems", "notes"
+]
 
 
 def _generate_run_id(now: Optional[datetime] = None) -> str:
@@ -40,7 +57,8 @@ def _looks_like_header(row: List[str]) -> bool:
     if not row:
         return False
     # If every cell is one of our known column names, treat as a header row.
-    return all(cell in set(HEADER) for cell in row)
+    all_known = set(HEADER) | set(LEGACY_ACCURACY_HEADER)
+    return all(cell in all_known for cell in row)
 
 
 def _normalize_row_to_header(row: List[str]) -> Dict[str, str]:
@@ -53,28 +71,40 @@ def _normalize_row_to_header(row: List[str]) -> Dict[str, str]:
     if row:
         row[0] = row[0].lstrip("\ufeff")
 
-    # Handle known legacy schemas safely (we've inserted new columns in the middle over time).
-    #
-    # Legacy v0 (10 cols):
-    #   run_id,date,model,dataset,method,compute_multiplier,accuracy,total_decoded_tokens,num_problems,notes
-    # Legacy v1 (12 cols):
-    #   run_id,date,model,dataset,method,compute_multiplier,accuracy,total_decoded_tokens,total_completion_tokens_used,total_tokens_used,num_problems,notes
-    # Current (14 cols):
-    #   run_id,date,model,dataset,method,compute_multiplier,accuracy,pass_at_k_accuracy,majority_vote_accuracy,
-    #   total_decoded_tokens,total_completion_tokens_used,total_tokens_used,num_problems,notes
-
-    # Missing run_id variants (pad on the left first, based on legacy lengths).
-    if len(row) in {9, 11, 13}:
+    # Handle legacy schemas:
+    # Legacy v0 (10 cols): run_id,date,model,dataset,method,compute_multiplier,accuracy,total_decoded_tokens,num_problems,notes
+    # Legacy v1 (12 cols): + total_completion_tokens_used,total_tokens_used
+    # Legacy v2 (14 cols): + pass_at_k_accuracy,majority_vote_accuracy (redundant accuracy)
+    # Current (13 cols): no "accuracy" column
+    
+    # Missing run_id variants (pad on the left first).
+    if len(row) in {9, 11, 12}:
         row = [""] + row
 
-    # Expand legacy v0 (10 -> 14) by inserting blanks in the right places.
+    # Expand legacy v0 (10 -> 13)
     if len(row) == 10:
-        # Insert pass@k + majority after accuracy; and token totals after total_decoded_tokens.
-        row = row[:7] + ["", ""] + [row[7]] + ["", ""] + row[8:]
-
-    # Expand legacy v1 (12 -> 14) by inserting blanks after accuracy.
+        # run_id,date,model,dataset,method,compute_multiplier,accuracy,total_decoded_tokens,num_problems,notes
+        # -> insert pass@k=accuracy, majority="", then token totals
+        accuracy_val = row[6]
+        row = row[:6] + [accuracy_val, ""] + [row[7]] + ["", ""] + row[8:]
+    
+    # Expand legacy v1 (12 -> 13)
     if len(row) == 12:
-        row = row[:7] + ["", ""] + row[7:]
+        # run_id,date,model,dataset,method,compute_multiplier,accuracy,total_decoded_tokens,total_completion_tokens_used,total_tokens_used,num_problems,notes
+        accuracy_val = row[6]
+        row = row[:6] + [accuracy_val, ""] + row[7:]
+    
+    # Handle legacy v2 with redundant accuracy column (14 -> 13)
+    if len(row) == 14:
+        # Old: run_id,date,model,dataset,method,compute_multiplier,accuracy,pass_at_k_accuracy,majority_vote_accuracy,...
+        # New: run_id,date,model,dataset,method,compute_multiplier,pass_at_k_accuracy,majority_vote_accuracy,...
+        # Use pass_at_k_accuracy if present, else fall back to accuracy
+        accuracy_val = row[6]  # old "accuracy"
+        pass_at_k_val = row[7]  # pass_at_k_accuracy
+        majority_val = row[8]   # majority_vote_accuracy
+        # Prefer pass_at_k_accuracy if non-empty, else use accuracy
+        final_pass_at_k = pass_at_k_val if pass_at_k_val else accuracy_val
+        row = row[:6] + [final_pass_at_k, majority_val] + row[9:]
 
     # Final normalization: pad/truncate to match current schema.
     if len(row) < len(HEADER):
@@ -151,7 +181,7 @@ def _ensure_results_csv_schema(csv_path: str) -> None:
             cleaned = [cell.strip() for cell in row]
             if cleaned:
                 cleaned[0] = cleaned[0].lstrip("\ufeff")
-            if cleaned == HEADER:
+            if cleaned == HEADER or cleaned == LEGACY_ACCURACY_HEADER:
                 continue
             if _looks_like_header(cleaned):
                 continue
@@ -164,16 +194,32 @@ def append_result_row(
     dataset: str,
     method: str,
     compute_multiplier: int,
-    accuracy: float,
+    pass_at_k_accuracy: float,
     total_decoded_tokens: int,
     num_problems: int,
-    pass_at_k_accuracy: float | None = None,
     majority_vote_accuracy: float | None = None,
     total_completion_tokens_used: int | None = None,
     total_tokens_used: int | None = None,
     notes: str = "",
     run_id: Optional[str] = None,
 ) -> None:
+    """
+    Append a result row to results/scaling_results.csv.
+    
+    Args:
+        model: Model name (e.g., "gpt-4o-mini")
+        dataset: Dataset name (e.g., "aime", "frontier_math")
+        method: Canonical method name (e.g., "uniform_best_of_n_budgeted", "two_phase_budgeted_sampling")
+        compute_multiplier: Budget multiplier (1, 10, 100, etc.)
+        pass_at_k_accuracy: PRIMARY METRIC - fraction of problems with at least one correct sample
+        total_decoded_tokens: Sum of decoded tokens across all problems
+        num_problems: Number of problems evaluated
+        majority_vote_accuracy: SECONDARY METRIC - fraction where majority vote is correct
+        total_completion_tokens_used: Same as total_decoded_tokens (for accounting)
+        total_tokens_used: Total tokens including prompt (for cost tracking)
+        notes: Free-form notes (subset=, seed=, cap_hit_rate=, etc.)
+        run_id: Unique run identifier (auto-generated if not provided)
+    """
     os.makedirs("results", exist_ok=True)
 
     csv_path = os.path.join("results", "scaling_results.csv")
@@ -192,7 +238,6 @@ def append_result_row(
         "dataset": dataset,
         "method": method,
         "compute_multiplier": compute_multiplier,
-        "accuracy": accuracy,
         "pass_at_k_accuracy": pass_at_k_accuracy,
         "majority_vote_accuracy": majority_vote_accuracy,
         "total_decoded_tokens": total_decoded_tokens,
@@ -211,4 +256,3 @@ def append_result_row(
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=HEADER)
         writer.writerow(row)
-

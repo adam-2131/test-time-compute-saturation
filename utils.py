@@ -78,10 +78,27 @@ def call_model(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
-    client = OpenAI(api_key=api_key)
+    # Make request timeouts configurable so flaky networks (or corp proxies) don't hard-fail.
+    # This is especially important on Windows where default connect timeouts can be too aggressive.
+    #
+    # Set via PowerShell:
+    #   $env:OPENAI_REQUEST_TIMEOUT_S = "120"
+    #   $env:OPENAI_MAX_ATTEMPTS = "8"
+    try:
+        timeout_s = float(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "60"))
+    except ValueError:
+        timeout_s = 60.0
+
+    try:
+        max_attempts = int(os.environ.get("OPENAI_MAX_ATTEMPTS", "5"))
+    except ValueError:
+        max_attempts = 5
+    max_attempts = max(1, max_attempts)
+
+    client = OpenAI(api_key=api_key, timeout=timeout_s)
 
     attempts = 0
-    max_attempts = 5
+    last_err: Exception | None = None
     while True:
         try:
             api_kwargs: dict[str, Any] = {
@@ -96,17 +113,25 @@ def call_model(
             break
         except (APITimeoutError, APIConnectionError) as e:
             attempts += 1
+            last_err = e
             if attempts >= max_attempts:
-                raise
+                raise RuntimeError(
+                    f"OpenAI request failed after {attempts} attempts (timeout_s={timeout_s}). "
+                    "This is usually network/proxy/DNS related. "
+                    "Try increasing OPENAI_REQUEST_TIMEOUT_S or check connectivity."
+                ) from e
             wait_s = min(2 ** attempts, 60)  # exponential backoff, max 60s
             time.sleep(wait_s)
         except RateLimitError as e:
             attempts += 1
+            last_err = e
             msg = str(e)
             if "requests per day" in msg or "RPD" in msg:
-                raise
+                raise RuntimeError("OpenAI rate limit hit (RPD).") from e
             if attempts >= max_attempts:
-                raise
+                raise RuntimeError(
+                    f"OpenAI request failed after {attempts} attempts due to rate limiting."
+                ) from e
             m = re.search(r"try again in ([0-9.]+)s", str(e), flags=re.IGNORECASE)
             wait_s = float(m.group(1)) if m else 10.0
             time.sleep(wait_s)
