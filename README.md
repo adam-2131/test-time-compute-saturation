@@ -1,8 +1,11 @@
 # Parallel-Sampling
 
-Research codebase for **test-time compute scaling** experiments: measure how accuracy scales with parallel sampling on math problems.
+Research codebase for test-time compute scaling experiments: measure how accuracy scales with parallel sampling on math problems.
 
-**Core claim under investigation:** Test-time compute scaling via parallel sampling saturates after ~10× and yields diminishing accuracy gains.
+This repository was built to test a common assumption in LLM inference-that sampling more answers at test time reliably improves correctness-under a controlled and reproducible setup.
+
+Core claim under investigation: Test-time compute scaling via parallel sampling saturates quickly and yields no measurable accuracy gains beyond a small constant factor.
+I initially expected at least modest improvements at k = 10, but did not observe any in practice.
 
 ## Quickstart
 
@@ -43,9 +46,9 @@ python scripts/plot_frontier.py
 ```
 
 Produces:
-- `plots/accuracy_vs_k.png` — Accuracy vs compute (log scale)
-- `plots/marginal_gain.png` — Marginal gains per 10× compute
-- `plots/effective_compute.png` — Early stopping savings
+- `plots/accuracy_vs_k.png` - Accuracy vs compute (log scale)
+- `plots/marginal_gain.png` - Marginal gains per 10× compute
+- `plots/effective_compute.png` - Early stopping savings
 
 ## Experiment Details
 
@@ -59,6 +62,7 @@ python main.py --method fixed_k_majority \
     --early-stop-stability 50 \
     --early-stop-confidence 0.95
 ```
+Early stopping is included intentionally to reflect realistic test-time usage. A control run disabling early stopping was also performed to verify that full k sampling does not improve accuracy.
 
 **Output format** (`experiments/k_*.csv`):
 ```
@@ -134,6 +138,8 @@ python main.py --method two_phase_budgeted_sampling --multipliers 1,10,100
 These write to `results/scaling_results.csv` and `results/per_problem_results.jsonl`.
 
 ## Limitations
+
+These results reflect a single experimental setting and should be interpreted accordingly.
 
 - **Single model family**: Results are specific to gpt-4o-mini
 - **Extraction noise**: Answer parsing can introduce errors
