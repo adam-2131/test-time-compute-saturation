@@ -160,9 +160,7 @@ def run_two_phase_budgeted_sampling(
 
         pass_at_k = False
 
-        # -------------------------
         # Round 1 (cheap scouting)
-        # -------------------------
         round1_budget = max(1, int(0.25 * budget_tokens))
         round1_max_tokens = max(1, min(int(max_tokens_cap), round1_budget // max(1, int(N))))
 
@@ -215,9 +213,7 @@ def run_two_phase_budgeted_sampling(
         else:
             survivors = round1[: int(K)]
 
-        # -------------------------
         # Round 2 (spend remaining)
-        # -------------------------
         r2_answers: list[str | None] = []
         if survivors:
             remaining = max(0, budget_tokens - decoded_tokens)
@@ -282,9 +278,7 @@ def run_two_phase_budgeted_sampling(
 run_successive_halving_with_budget = run_two_phase_budgeted_sampling
 
 
-# =============================================================================
 # Fixed-k Majority Voting (new experimental path per locked spec)
-# =============================================================================
 
 import math
 import time
