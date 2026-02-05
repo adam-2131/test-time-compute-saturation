@@ -8,7 +8,15 @@ import re
 import time
 from typing import Any, TypeVar
 
-from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError
+from openai import (
+    OpenAI,
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 from pydantic import BaseModel
 
 @dataclass
@@ -78,27 +86,10 @@ def call_model(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
-    # Make request timeouts configurable so flaky networks (or corp proxies) don't hard-fail.
-    # This is especially important on Windows where default connect timeouts can be too aggressive.
-    #
-    # Set via PowerShell:
-    #   $env:OPENAI_REQUEST_TIMEOUT_S = "120"
-    #   $env:OPENAI_MAX_ATTEMPTS = "8"
-    try:
-        timeout_s = float(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "60"))
-    except ValueError:
-        timeout_s = 60.0
-
-    try:
-        max_attempts = int(os.environ.get("OPENAI_MAX_ATTEMPTS", "5"))
-    except ValueError:
-        max_attempts = 5
-    max_attempts = max(1, max_attempts)
-
-    client = OpenAI(api_key=api_key, timeout=timeout_s)
+    client = OpenAI(api_key=api_key)
 
     attempts = 0
-    last_err: Exception | None = None
+    max_attempts = 5
     while True:
         try:
             api_kwargs: dict[str, Any] = {
@@ -111,27 +102,45 @@ def call_model(
                 api_kwargs["seed"] = seed
             resp = client.chat.completions.create(**api_kwargs)
             break
+        except AuthenticationError as e:
+            # Typically: missing/invalid/expired key.
+            raise RuntimeError(
+                "OpenAI authentication failed (HTTP 401). "
+                "Check that $env:OPENAI_API_KEY is set to a valid key for this machine/session."
+            ) from e
+        except PermissionDeniedError as e:
+            # Typically: key is valid, but not allowed to use the requested model/project.
+            raise RuntimeError(
+                "OpenAI permission denied (HTTP 403). "
+                f"Your key/project likely does not have access to model '{model}'.\n"
+                "Fixes:\n"
+                "  - Verify $env:OPENAI_API_KEY points to the right account/project.\n"
+                "  - Try a different model via main.py's --model flag (e.g. --model gpt-4o-mini).\n"
+                "  - Ensure billing/quotas are enabled for the project associated with the key."
+            ) from e
+        except BadRequestError as e:
+            # Often: invalid request params for the selected model (e.g., unsupported 'seed').
+            msg = str(e)
+            hint = ""
+            if "seed" in msg.lower():
+                hint = (
+                    "\nHint: this model may not support the 'seed' parameter. "
+                    "Try switching models with --model or (if needed) we can add a flag to disable seeding."
+                )
+            raise RuntimeError(f"OpenAI request rejected (HTTP 400): {msg}{hint}") from e
         except (APITimeoutError, APIConnectionError) as e:
             attempts += 1
-            last_err = e
             if attempts >= max_attempts:
-                raise RuntimeError(
-                    f"OpenAI request failed after {attempts} attempts (timeout_s={timeout_s}). "
-                    "This is usually network/proxy/DNS related. "
-                    "Try increasing OPENAI_REQUEST_TIMEOUT_S or check connectivity."
-                ) from e
+                raise
             wait_s = min(2 ** attempts, 60)  # exponential backoff, max 60s
             time.sleep(wait_s)
         except RateLimitError as e:
             attempts += 1
-            last_err = e
             msg = str(e)
             if "requests per day" in msg or "RPD" in msg:
-                raise RuntimeError("OpenAI rate limit hit (RPD).") from e
+                raise
             if attempts >= max_attempts:
-                raise RuntimeError(
-                    f"OpenAI request failed after {attempts} attempts due to rate limiting."
-                ) from e
+                raise
             m = re.search(r"try again in ([0-9.]+)s", str(e), flags=re.IGNORECASE)
             wait_s = float(m.group(1)) if m else 10.0
             time.sleep(wait_s)

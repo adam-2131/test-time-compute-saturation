@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Bootstrap 95% confidence intervals over problems (no new model calls).
+LEGACY: Bootstrap 95% confidence intervals for token-budgeted experiments.
 
-This script operates on per-problem correctness artifacts written by `main.py`:
+This script operates on artifacts from the legacy token-budgeted experiments:
   results/per_problem_results.jsonl
 
-Each line is a JSON object containing per-problem boolean arrays for a single
-run_id + compute_multiplier.
+The primary experiment path is now fixed-k majority voting (--method fixed_k_majority),
+which outputs per-example CSVs to experiments/k_*.csv.
+
+Keep for backwards compatibility with existing token-budgeted results.
 """
 
 from __future__ import annotations
@@ -208,6 +210,15 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
 
 
 

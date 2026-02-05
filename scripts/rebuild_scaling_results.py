@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Rebuild results/scaling_results.csv from results/scaling_results_raw.csv.
+LEGACY: Rebuild results/scaling_results.csv from results/scaling_results_raw.csv.
+
+This script supports the legacy token-budgeted experiments. The primary experiment
+path is now fixed-k majority voting (--method fixed_k_majority).
 
 Includes ONLY rows that satisfy:
 - run_id is non-empty OR can be backfilled as legacy_<line_number>

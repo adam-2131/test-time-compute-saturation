@@ -1,398 +1,429 @@
-"""
-Evaluation methods for test-time compute scaling experiments.
+from __future__ import annotations
 
-Methods:
-  - run_best_of_n_with_budget: Uniform sampling until budget exhausted (pass@k primary)
-  - run_two_phase_budgeted_sampling: Two-phase budget schedule (NOT successive halving)
-
-IMPORTANT: "two_phase_budgeted_sampling" is a budget schedule, NOT adaptive allocation.
-  - Round 1: short samples, scored by self-consistency
-  - Round 2: fresh samples (no trace continuation), majority vote
-  - Does NOT condition round 2 sampling on round 1 survivors' traces
-"""
-import hashlib
 from collections import Counter
+import hashlib
+from typing import Any
 
 from utils import call_model
 from parse import extract_final_answer
 from prompting import format_math_prompt
 
+# Debug flag - set to True to print budget info for first problem
+DEBUG_BUDGET = False
 
-def derive_call_seed(base_seed: int | None, problem_id: str, draw_idx: int) -> int | None:
+
+def _derive_seed(base_seed: int, *, problem_index: int, call_index: int, tag: str) -> int:
     """
-    Derive a deterministic seed for each model call to ensure sampling independence.
-    
-    Uses sha256 mixing (not Python hash()) for stability across runs and platforms.
-    
-    Args:
-        base_seed: The base seed from the experiment config. If None, returns None.
-        problem_id: Unique identifier for the problem (ensures different problems get different seeds)
-        draw_idx: Index of this sample within the problem (ensures each draw gets a different seed)
-    
-    Returns:
-        A 32-bit integer derived from the inputs, or None if base_seed is None.
+    Deterministic per-call seed derivation (stable across processes/runs).
+    OpenAI expects an int; keep it in 32-bit signed range.
     """
-    if base_seed is None:
+    payload = f"{base_seed}:{problem_index}:{call_index}:{tag}".encode("utf-8")
+    digest = hashlib.sha256(payload).digest()
+    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+
+
+def _majority_vote(answers: list[str | None]) -> str | None:
+    valid = [a for a in answers if a is not None]
+    if not valid:
         return None
-    s = f"{base_seed}|{problem_id}|{draw_idx}".encode("utf-8")
-    h = hashlib.sha256(s).hexdigest()
-    return int(h[:8], 16)  # 32-bit int
+    counts = Counter(valid)
+    # Deterministic tie-break: highest count, then lexicographic.
+    best_count = max(counts.values())
+    best = sorted([a for a, c in counts.items() if c == best_count])[0]
+    return best
 
 
-def run_best_of_n_with_budget(problems, model, temperature, max_tokens, budget_tokens, *, seed=None):
+def run_best_of_n_with_budget(
+    problems: list[dict[str, Any]],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    budget_tokens: int,
+    *,
+    seed: int = 0,
+) -> list[dict[str, Any]]:
     """
-    Uniform sampling (best-of-N) under a decoded-token budget.
-    
-    Primary metric: pass@k (any correct among accepted samples)
-    Secondary metric: majority_correct (majority vote over valid answers)
-    
-    Args:
-        problems: list of problem dicts with "id", "problem", "answer"
-        model: model name
-        temperature: sampling temperature
-        max_tokens: max tokens per completion
-        budget_tokens: per-problem decoded token budget
-        seed: base seed for deterministic sampling (derived per draw)
-    
-    Returns:
-        list of result dicts
-    """
-    results = []
+    Uniform budgeted sampling: keep drawing independent samples until the decoded
+    completion-token budget would be exhausted.
 
-    for p in problems:
+    Returns per-problem dicts with keys used by main.py:
+      - id, pass_at_k, majority_correct
+      - decoded_tokens, total_completion_tokens_used, total_tokens_used
+      - total_calls, cap_hit_calls
+    """
+    results: list[dict[str, Any]] = []
+
+    for p_idx, p in enumerate(problems):
+        if DEBUG_BUDGET and p_idx == 0:
+            print(f"[budget] method=uniform B={budget_tokens}")
+
         prompt = format_math_prompt(p["problem"])
-        problem_id = str(p["id"])
-        samples_taken = 0
+        gold = str(p["answer"]).strip()
+
         decoded_tokens = 0
         total_completion_tokens_used = 0
         total_tokens_used = 0
-        passed = False  # pass@k (any correct among accepted samples)
-        answers: list[str | None] = []
         total_calls = 0
         cap_hit_calls = 0
-        draw_idx = 0
 
+        answers: list[str | None] = []
+        pass_at_k = False
+
+        call_i = 0
         while True:
-            if decoded_tokens >= budget_tokens:
+            remaining = budget_tokens - decoded_tokens
+            if remaining <= 0:
                 break
-
-            # Derive unique seed for this specific call
-            call_seed = derive_call_seed(seed, problem_id, draw_idx)
+            max_tokens_this = max(1, min(int(remaining), int(max_tokens)))
 
             out = call_model(
                 prompt,
                 model=model,
                 temperature=temperature,
-                max_tokens=max_tokens,
-                seed=call_seed,
-                cache_salt=(draw_idx if temperature != 0.0 else None),
+                max_tokens=max_tokens_this,
+                seed=_derive_seed(seed, problem_index=p_idx, call_index=call_i, tag="uniform"),
             )
+            call_i += 1
+
+            used_completion = int(out.completion_tokens or 0)
+            used_total = int(out.total_tokens or (used_completion + int(out.prompt_tokens or 0)))
+
+            decoded_tokens += used_completion
+            total_completion_tokens_used += used_completion
+            total_tokens_used += used_total
             total_calls += 1
-            draw_idx += 1
-
-            ctoks = out.completion_tokens or 0
-            ptoks = out.prompt_tokens or 0
-            ttoks = out.total_tokens
-            if ttoks is None:
-                ttoks = ptoks + ctoks
-            if ctoks == max_tokens:
+            if out.completion_tokens is not None and used_completion >= max_tokens_this:
                 cap_hit_calls += 1
-
-            # Preserve existing budgeting logic: budget is completion tokens only.
-            if decoded_tokens + ctoks > budget_tokens:
-                break
-
-            decoded_tokens += ctoks
-            total_completion_tokens_used += ctoks
-            total_tokens_used += ttoks
-            samples_taken += 1
 
             pred = extract_final_answer(out.text)
             answers.append(pred)
-            if pred == p["answer"]:
-                passed = True
+            if pred is not None and pred == gold:
+                pass_at_k = True
 
-        valid_answers = [a for a in answers if a is not None]
-        majority_correct = False
-        if valid_answers:
-            majority_answer = Counter(valid_answers).most_common(1)[0][0]
-            majority_correct = (majority_answer == p["answer"])
+            # Safety: if the API ever reports 0 completion tokens, don't loop forever.
+            if used_completion <= 0:
+                break
 
-        # Primary metric is pass@k for ALL methods (comparable across methods)
+        majority = _majority_vote(answers)
+        majority_correct = bool(majority is not None and majority == gold)
+
         results.append(
             {
                 "id": p["id"],
-                "samples_taken": samples_taken,
+                "pass_at_k": pass_at_k,
+                "majority_correct": majority_correct,
                 "decoded_tokens": decoded_tokens,
                 "total_completion_tokens_used": total_completion_tokens_used,
                 "total_tokens_used": total_tokens_used,
-                "pass": passed,  # PRIMARY: pass@k
-                "pass_at_k": passed,
-                "majority_correct": majority_correct,  # SECONDARY
                 "total_calls": total_calls,
                 "cap_hit_calls": cap_hit_calls,
+                "samples_taken": len(answers),
             }
         )
 
     return results
 
 
-# =============================================================================
-# Two-phase budgeted sampling (NOT successive halving / NOT adaptive allocation)
-#   R=2 rounds, fixed N=16, K=4
-# =============================================================================
-# Algorithm:
-#   Round 1: generate N samples with short max_tokens = floor(0.25*B / N)
-#            Score each by answer frequency (self-consistency).
-#            Select K survivors from most frequent answer groups.
-#   Round 2: generate (possibly multiple batches of) K fresh samples with max_tokens = max_tokens_cap
-#            Final answer = majority vote across round-2 answers.
-#
-# IMPORTANT: This is a budget SCHEDULE, not adaptive allocation:
-#   1. Round 2 does NOT continue from round 1 traces (fresh samples)
-#   2. There is no actual trace continuation or "halving" of candidates
-#   3. Survivor selection only affects which answer groups are "favored" in round 1 scoring
-
-
 def run_two_phase_budgeted_sampling(
-    problems, model, temperature, max_tokens_cap, budget_tokens, *, N=16, K=4, seed=None
-):
+    problems: list[dict[str, Any]],
+    model: str,
+    temperature: float,
+    max_tokens_cap: int,
+    budget_tokens: int,
+    *,
+    N: int = 16,
+    K: int = 4,
+    seed: int = 0,
+) -> list[dict[str, Any]]:
     """
-    Two-phase budgeted sampling with R=2 rounds (no trace continuation).
-    
-    This is a budget SCHEDULE, not adaptive allocation. Round 2 generates
-    fresh samples; it does not continue traces from round 1 survivors.
-    
-    Primary metric: pass@k (any correct among ALL samples)
-    Secondary metric: majority_correct (final majority vote)
-    
-    Args:
-        problems: list of problem dicts with "id", "problem", "answer"
-        model: model name
-        temperature: sampling temperature
-        max_tokens_cap: absolute cap on max_tokens per call (safety)
-        budget_tokens: per-problem decoded token budget B
-        N: initial samples in round 1 (default 16)
-        K: survivors to round 2 (default 4)
-        seed: base seed for deterministic sampling (derived per draw)
-    
-    Returns:
-        list of result dicts with "id", "samples_taken", "decoded_tokens", "pass"
+    Two-phase budgeted sampling (2 rounds, no explicit trace continuation):
+      - Round 1: N short calls to cheaply estimate a self-consistent answer.
+      - Round 2: K longer calls, targeting the K "survivor" seeds from the most
+        frequent Round-1 answer groups.
+      - pass@k: any correct answer across *all* calls.
+      - majority_correct: majority vote across Round-2 extracted answers (fallback to survivors).
     """
-    results = []
+    results: list[dict[str, Any]] = []
 
-    for p in problems:
-        problem_result = _two_phase_one_problem(
-            problem=p,
-            model=model,
-            temperature=temperature,
-            max_tokens_cap=max_tokens_cap,
-            budget=budget_tokens,
-            N=N,
-            K=K,
-            seed=seed,
-        )
-        results.append(problem_result)
+    for p_idx, p in enumerate(problems):
+        if DEBUG_BUDGET and p_idx == 0:
+            print(f"[budget] method=two_phase B={budget_tokens} N={N} K={K}")
 
-    return results
+        prompt = format_math_prompt(p["problem"])
+        gold = str(p["answer"]).strip()
 
+        decoded_tokens = 0
+        total_completion_tokens_used = 0
+        total_tokens_used = 0
+        total_calls = 0
+        cap_hit_calls = 0
 
-# Backward compatibility aliases (emit warnings in main.py)
-run_two_stage_self_consistency_budgeted = run_two_phase_budgeted_sampling
-run_successive_halving_with_budget = run_two_phase_budgeted_sampling
+        pass_at_k = False
 
+        # -------------------------
+        # Round 1 (cheap scouting)
+        # -------------------------
+        round1_budget = max(1, int(0.25 * budget_tokens))
+        round1_max_tokens = max(1, min(int(max_tokens_cap), round1_budget // max(1, int(N))))
 
-def _two_phase_one_problem(
-    *, problem, model, temperature, max_tokens_cap, budget, N, K, seed=None
-):
-    """Run two-phase budgeted sampling on a single problem.
-    
-    Budget accounting:
-    - Round 1 gets 25% of budget B, split across N samples
-    - Round 2 uses remaining budget (B - round1_actual) by generating batches
-      of K samples until budget is exhausted (same scaling as uniform)
-    - max_tokens per call uses max_tokens_cap (same as uniform) to allow
-      comparable spending via multiple calls
-      
-    Primary metric: pass@k (any correct among ALL samples from both rounds)
-    Secondary metric: majority_correct (final majority vote from round 2)
-    """
-    prompt = format_math_prompt(problem["problem"])
-    gold_answer = problem["answer"]
-    problem_id = str(problem["id"])
-
-    # Round 1 budget: 25% of total, split across N samples
-    round1_budget = int(0.25 * budget)
-    round1_max_tokens = max(1, min(round1_budget // N, max_tokens_cap))
-
-    # Round 1: generate N samples
-    round1_samples = []
-    spent = 0  # Track actual decoded tokens
-    total_tokens_used = 0
-    draw_idx = 0
-    all_answers: list[str | None] = []
-    total_calls = 0
-    cap_hit_calls = 0
-
-    for i in range(N):
-        # Derive unique seed for this specific call
-        call_seed = derive_call_seed(seed, problem_id, draw_idx)
-        
-        out = call_model(
-            prompt,
-            model=model,
-            temperature=temperature,
-            max_tokens=round1_max_tokens,
-            seed=call_seed,
-            cache_salt=(draw_idx if temperature != 0.0 else None),
-        )
-        total_calls += 1
-        draw_idx += 1
-        ctoks = out.completion_tokens or 0
-        ptoks = out.prompt_tokens or 0
-        ttoks = out.total_tokens
-        if ttoks is None:
-            ttoks = ptoks + ctoks
-        if ctoks == round1_max_tokens:
-            cap_hit_calls += 1
-
-        spent += ctoks
-        total_tokens_used += ttoks
-
-        answer = extract_final_answer(out.text)
-        all_answers.append(answer)
-        round1_samples.append({
-            "index": i,
-            "text": out.text,
-            "answer": answer,
-            "tokens": ctoks,
-        })
-
-    # Score by answer frequency (self-consistency)
-    answer_counts = Counter(
-        s["answer"] for s in round1_samples if s["answer"] is not None
-    )
-
-    # Assign frequency score to each sample (0 if unparsable)
-    for s in round1_samples:
-        if s["answer"] is None:
-            s["score"] = 0
-        else:
-            s["score"] = answer_counts[s["answer"]]
-
-    # Select K survivors: sort by score desc, then by index asc (deterministic tie-break)
-    sorted_samples = sorted(
-        round1_samples, key=lambda s: (-s["score"], s["index"])
-    )
-    survivors = sorted_samples[:K]
-
-    # Round 2: use remaining budget by generating batches of K samples
-    # until budget is exhausted (matching uniform's scaling behavior)
-    round2_answers = []
-    round2_samples_taken = 0
-
-    while spent < budget:
-        # Check if we can afford another batch of K samples
-        remaining = budget - spent
-        if remaining < K:
-            break
-        
-        # Use same max_tokens as uniform (max_tokens_cap) for comparable spending
-        round2_max_tokens = max_tokens_cap
-        
-        # Generate K samples in this batch
-        batch_answers = []
-        batch_spent = 0
-        batch_total_tokens = 0
-        
-        for _ in range(K):
-            # Pre-check: stop if budget would be exceeded
-            if spent + batch_spent >= budget:
+        round1: list[dict[str, Any]] = []
+        for i in range(int(N)):
+            remaining = budget_tokens - decoded_tokens
+            if remaining <= 0:
                 break
-            
-            # Derive unique seed for this specific call
-            call_seed = derive_call_seed(seed, problem_id, draw_idx)
-            
+            max_tokens_this = max(1, min(int(remaining), int(round1_max_tokens)))
+            s = _derive_seed(seed, problem_index=p_idx, call_index=i, tag="two_phase_r1")
             out = call_model(
                 prompt,
                 model=model,
                 temperature=temperature,
-                max_tokens=round2_max_tokens,
-                seed=call_seed,
-                cache_salt=(draw_idx if temperature != 0.0 else None),
+                max_tokens=max_tokens_this,
+                seed=s,
             )
+            used_completion = int(out.completion_tokens or 0)
+            used_total = int(out.total_tokens or (used_completion + int(out.prompt_tokens or 0)))
+
+            decoded_tokens += used_completion
+            total_completion_tokens_used += used_completion
+            total_tokens_used += used_total
             total_calls += 1
-            draw_idx += 1
-            ctoks = out.completion_tokens or 0
-            ptoks = out.prompt_tokens or 0
-            ttoks = out.total_tokens
-            if ttoks is None:
-                ttoks = ptoks + ctoks
-            if ctoks == round2_max_tokens:
+            if out.completion_tokens is not None and used_completion >= max_tokens_this:
                 cap_hit_calls += 1
-            
-            # Post-check: don't count if it would exceed budget
-            if spent + batch_spent + ctoks > budget:
+
+            pred = extract_final_answer(out.text)
+            if pred is not None and pred == gold:
+                pass_at_k = True
+
+            round1.append({"i": i, "seed": s, "answer": pred})
+
+            if used_completion <= 0:
                 break
-            
-            batch_spent += ctoks
-            batch_total_tokens += ttoks
-            answer = extract_final_answer(out.text)
-            batch_answers.append(answer)
-            all_answers.append(answer)
-            round2_samples_taken += 1
-        
-        spent += batch_spent
-        total_tokens_used += batch_total_tokens
-        round2_answers.extend(batch_answers)
-        
-        # If we couldn't complete a full batch, stop
-        if len(batch_answers) < K:
-            break
 
-    # If no round 2 samples generated, use round 1 survivors' answers
-    if not round2_answers:
-        round2_answers = [s["answer"] for s in survivors]
+        # Group answers by frequency and select survivors.
+        counts = Counter(r["answer"] for r in round1 if r["answer"] is not None)
+        # Highest frequency first; deterministic tie-break by answer string.
+        ranked_answers = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0])))
+        top_answers = [a for a, _ in ranked_answers[: max(1, int(K))]] if ranked_answers else []
 
-    # Final answer: majority vote across round 2 answers (for majority_correct)
-    valid_round2 = [a for a in round2_answers if a is not None]
-    if valid_round2:
-        final_answer = Counter(valid_round2).most_common(1)[0][0]
-    else:
-        # Fallback to round 1 majority if round 2 all unparsable
-        valid_r1 = [s["answer"] for s in survivors if s["answer"] is not None]
-        if valid_r1:
-            final_answer = Counter(valid_r1).most_common(1)[0][0]
+        survivors: list[dict[str, Any]] = []
+        if top_answers:
+            for r in round1:
+                if r["answer"] in set(top_answers):
+                    survivors.append(r)
+                if len(survivors) >= int(K):
+                    break
         else:
-            final_answer = None
+            survivors = round1[: int(K)]
 
-    total_samples = N + round2_samples_taken
-    
-    # PRIMARY METRIC: pass@k = any correct among ALL samples (both rounds)
-    pass_at_k = any(a == gold_answer for a in all_answers if a is not None)
-    
-    # SECONDARY METRIC: majority_correct = final answer matches gold
-    majority_correct = (final_answer == gold_answer)
+        # -------------------------
+        # Round 2 (spend remaining)
+        # -------------------------
+        r2_answers: list[str | None] = []
+        if survivors:
+            remaining = max(0, budget_tokens - decoded_tokens)
+            per_call_budget = max(1, remaining // len(survivors)) if remaining else 1
+            round2_max_tokens = max(1, min(int(max_tokens_cap), int(per_call_budget)))
 
-    # Assertion: spent should not exceed budget + small slack (allow 10 tokens slack)
-    assert spent <= budget + 10, (
-        f"Budget exceeded: spent {spent} > budget {budget} + 10 slack"
-    )
+            for j, s in enumerate(survivors):
+                remaining = budget_tokens - decoded_tokens
+                if remaining <= 0:
+                    break
+                max_tokens_this = max(1, min(int(remaining), int(round2_max_tokens)))
 
-    return {
-        "id": problem["id"],
-        "samples_taken": total_samples,
-        "decoded_tokens": spent,
-        "total_completion_tokens_used": spent,
-        "total_tokens_used": total_tokens_used,
-        "pass": pass_at_k,  # PRIMARY: pass@k (comparable with uniform)
-        "pass_at_k": pass_at_k,
-        "majority_correct": majority_correct,  # SECONDARY
-        "total_calls": total_calls,
-        "cap_hit_calls": cap_hit_calls,
-    }
+                out = call_model(
+                    prompt,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens_this,
+                    seed=int(s["seed"]),
+                )
+                used_completion = int(out.completion_tokens or 0)
+                used_total = int(out.total_tokens or (used_completion + int(out.prompt_tokens or 0)))
+
+                decoded_tokens += used_completion
+                total_completion_tokens_used += used_completion
+                total_tokens_used += used_total
+                total_calls += 1
+                if out.completion_tokens is not None and used_completion >= max_tokens_this:
+                    cap_hit_calls += 1
+
+                pred = extract_final_answer(out.text)
+                r2_answers.append(pred)
+                if pred is not None and pred == gold:
+                    pass_at_k = True
+
+                if used_completion <= 0:
+                    break
+
+        if not r2_answers:
+            r2_answers = [s.get("answer") for s in survivors]
+
+        final = _majority_vote(r2_answers)
+        majority_correct = bool(final is not None and final == gold)
+
+        results.append(
+            {
+                "id": p["id"],
+                "pass_at_k": pass_at_k,
+                "majority_correct": majority_correct,
+                "decoded_tokens": decoded_tokens,
+                "total_completion_tokens_used": total_completion_tokens_used,
+                "total_tokens_used": total_tokens_used,
+                "total_calls": total_calls,
+                "cap_hit_calls": cap_hit_calls,
+                "samples_taken": len(round1) + len(r2_answers),
+            }
+        )
+
+    return results
 
 
-# Legacy aliases for backward compatibility
-_two_stage_self_consistency_one_problem = _two_phase_one_problem
-_successive_halving_one_problem = _two_phase_one_problem
+# Back-compat: old name used in earlier drafts.
+run_successive_halving_with_budget = run_two_phase_budgeted_sampling
+
+
+# =============================================================================
+# Fixed-k Majority Voting (new experimental path per locked spec)
+# =============================================================================
+
+import math
+import time
+
+
+def majority_stats(answers: list[str | None]) -> tuple[str | None, float, float]:
+    """
+    Compute majority vote statistics from a list of extracted answers.
+
+    Returns:
+        (prediction, confidence, entropy)
+        - prediction: majority answer (or None if no valid answers)
+        - confidence: fraction of votes for majority answer (0.0 if no valid answers)
+        - entropy: Shannon entropy of vote distribution in bits (0.0 if no valid answers)
+    """
+    valid = [a for a in answers if a is not None]
+    if not valid:
+        return None, 0.0, 0.0
+
+    counts = Counter(valid)
+    total = len(valid)
+
+    # Majority prediction (deterministic tie-break: highest count, then lexicographic)
+    best_count = max(counts.values())
+    prediction = sorted([a for a, c in counts.items() if c == best_count])[0]
+
+    # Confidence = fraction of votes for majority
+    confidence = best_count / total
+
+    # Shannon entropy in bits
+    entropy = 0.0
+    for count in counts.values():
+        if count > 0:
+            p = count / total
+            entropy -= p * math.log2(p)
+
+    return prediction, confidence, entropy
+
+
+def run_fixed_k_majority(
+    problems: list[dict[str, Any]],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    k_max: int,
+    *,
+    seed: int = 0,
+    early_stop_stability: int = 50,
+    early_stop_confidence: float = 0.95,
+) -> list[dict[str, Any]]:
+    """
+    Fixed-k majority voting with mandatory early stopping.
+
+    For each problem:
+      - Sample up to k_max completions
+      - Stop early if:
+        (a) majority prediction unchanged for last `early_stop_stability` samples, OR
+        (b) majority vote confidence >= `early_stop_confidence`
+      - Compute final prediction via majority vote
+
+    Args:
+        problems: list of problem dicts with "id", "problem", "answer"
+        model: model name
+        temperature: sampling temperature
+        max_tokens: max tokens per completion
+        k_max: maximum number of samples per problem
+        seed: base seed for deterministic sampling
+        early_stop_stability: number of consecutive samples with unchanged majority to trigger stop
+        early_stop_confidence: confidence threshold to trigger stop
+
+    Returns:
+        list of per-problem result dicts with:
+          - example_id, k_max, k_used, prediction, confidence, entropy, correct, runtime_seconds
+    """
+    results: list[dict[str, Any]] = []
+
+    for p_idx, p in enumerate(problems):
+        start_time = time.perf_counter()
+
+        prompt = format_math_prompt(p["problem"])
+        gold = str(p["answer"]).strip()
+
+        answers: list[str | None] = []
+        k_used = 0
+
+        # Track majority stability for early stopping
+        prev_majority: str | None = None
+        stability_counter = 0
+
+        for call_i in range(k_max):
+            # Generate one sample
+            out = call_model(
+                prompt,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=_derive_seed(seed, problem_index=p_idx, call_index=call_i, tag="fixed_k"),
+            )
+
+            pred = extract_final_answer(out.text)
+            answers.append(pred)
+            k_used += 1
+
+            # Compute current majority stats
+            current_majority, current_confidence, _ = majority_stats(answers)
+
+            # Check early stopping: confidence threshold
+            if current_confidence >= early_stop_confidence:
+                break
+
+            # Check early stopping: stability (majority unchanged for N consecutive samples)
+            if current_majority == prev_majority and current_majority is not None:
+                stability_counter += 1
+                if stability_counter >= early_stop_stability:
+                    break
+            else:
+                stability_counter = 1  # Reset: this sample is the first with new majority
+                prev_majority = current_majority
+
+        # Final aggregation
+        prediction, confidence, entropy = majority_stats(answers)
+        correct = bool(prediction is not None and prediction == gold)
+
+        elapsed = time.perf_counter() - start_time
+
+        results.append(
+            {
+                "example_id": p["id"],
+                "k_max": k_max,
+                "k_used": k_used,
+                "prediction": prediction,
+                "confidence": confidence,
+                "entropy": entropy,
+                "correct": correct,
+                "runtime_seconds": elapsed,
+                # Also include gold for debugging (not in spec CSV but useful internally)
+                "_gold": gold,
+            }
+        )
+
+    return results
+
