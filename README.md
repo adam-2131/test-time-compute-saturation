@@ -119,6 +119,9 @@ plots*/          figures
 - AIME: [gneubig/aime-1983-2024](https://huggingface.co/datasets/gneubig/aime-1983-2024), rebuilt with `scripts/build_aime_jsonl.py`
 - GSM8K: [gsm8k](https://huggingface.co/datasets/gsm8k), test split, rebuilt with `scripts/build_gsm8k_jsonl.py`
 
+The files in `data/` are the exact versions the experiments used. The current
+Hugging Face copy of AIME differs from it by one double space (problem 1984-1).
+
 ## Limitations
 
 - Only two small models from the same provider.

@@ -1,45 +1,37 @@
 """Build data/gsm8k.jsonl from the Hugging Face dataset gsm8k (config "main",
-test split). The answer is the number after "####" in the solution text.
+test split, 1319 problems). The answer is the number after "####" in the
+solution text.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import re
+from pathlib import Path
 
 from datasets import load_dataset
 
-_ANSWER_RE = re.compile(r"####\s*(.+?)\s*$")
+OUT_PATH = Path("data/gsm8k.jsonl")
 
 
-def _extract_gold(answer_field):
-    m = _ANSWER_RE.search(answer_field.strip())
-    raw = m.group(1) if m else answer_field.strip()
-    return raw.replace(",", "").strip()
+def gold_answer(solution):
+    # e.g. "... so she makes 18 dollars.\n#### 18"; "1,000" is stored as "1000"
+    return solution.split("####")[-1].replace(",", "").strip()
 
 
 def main():
-    ds = load_dataset("gsm8k", "main")
-    split = ds["test"] if "test" in ds else next(iter(ds.values()))
+    rows = load_dataset("gsm8k", "main", split="test")
 
-    out_path = os.path.join("data", "gsm8k.jsonl")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-
-    n = 0
-    with open(out_path, "w", encoding="utf-8") as f:
-        for idx, row in enumerate(split):
-            problem = str(row.get("question", "")).strip()
-            answer = _extract_gold(str(row.get("answer", "")))
-            rec = {
+    OUT_PATH.parent.mkdir(exist_ok=True)
+    with OUT_PATH.open("w", encoding="utf-8") as fh:
+        for idx, row in enumerate(rows):
+            record = {
                 "id": f"gsm8k-test-{idx}",
-                "problem": problem,
-                "answer": answer,
+                "problem": row["question"].strip(),
+                "answer": gold_answer(row["answer"]),
             }
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            n += 1
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    print(f"wrote {n} rows to {out_path}")
+    print(f"wrote {len(rows)} rows to {OUT_PATH}")
 
 
 if __name__ == "__main__":

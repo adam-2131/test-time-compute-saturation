@@ -16,23 +16,9 @@ import pandas as pd
 matplotlib.use("Agg")  # only save files, no window
 import matplotlib.pyplot as plt  # noqa: E402
 
-from analysis import discover_k_values
+from analysis import PLOT_STYLE, discover_k_values, log_xlim
 
-plt.rcParams.update({
-    "figure.figsize": (9, 5.5),
-    "savefig.dpi": 200,
-    "font.size": 12,
-    "axes.titlesize": 15,
-    "axes.titleweight": "bold",
-    "axes.grid": True,
-    "grid.linestyle": "--",
-    "grid.alpha": 0.5,
-})
-
-
-def log_xlim(k_values):
-    # some room left and right so the outer labels are not cut off
-    return min(k_values) * 0.55, max(k_values) * 1.9
+plt.rcParams.update(PLOT_STYLE)
 
 
 def label_point(ax, x, y, text, *, dx=0, dy=12, ha="center", color="black"):
@@ -65,7 +51,6 @@ def summarize(data):
             "accuracy": df["correct"].mean(),
             "avg_k_used": df["k_used"].mean(),
             "avg_confidence": df["confidence"].mean(),
-            "avg_entropy": df["entropy"].mean(),
             "n_examples": len(df),
         })
     return pd.DataFrame(rows)

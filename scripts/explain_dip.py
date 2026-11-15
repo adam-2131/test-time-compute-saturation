@@ -62,8 +62,6 @@ def main():
     if changed:
         peak = max(float(after[i]["confidence"]) for i in changed)
         print(f"\nhighest confidence among changed problems: {peak:.3f}")
-
-    if changed:
         p = mcnemar_exact(len(lost), len(won))
         print(f"\nMcNemar exact test on {len(changed)} discordant problems "
               f"({len(lost)} lost / {len(won)} won): p = {p:.3f}")

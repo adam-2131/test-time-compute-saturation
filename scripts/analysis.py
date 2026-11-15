@@ -1,4 +1,4 @@
-"""Helpers shared by the analysis scripts.
+"""Helpers shared by the analysis and plot scripts.
 
 A run is a folder with one CSV per k value (k_1.csv, k_10.csv, ...), as
 written by main.py.
@@ -8,10 +8,23 @@ from __future__ import annotations
 
 import csv
 from math import comb
-from pathlib import Path
 
-# main.py writes 1/0, older files used True/False
-TRUTHY = {"1", "true"}
+# matplotlib settings used by both plot scripts
+PLOT_STYLE = {
+    "figure.figsize": (9, 5.5),
+    "savefig.dpi": 200,
+    "font.size": 12,
+    "axes.titlesize": 15,
+    "axes.titleweight": "bold",
+    "axes.grid": True,
+    "grid.linestyle": "--",
+    "grid.alpha": 0.5,
+}
+
+
+def log_xlim(k_values):
+    # some room left and right so the outer labels are not cut off
+    return min(k_values) * 0.55, max(k_values) * 1.9
 
 
 def discover_k_values(run_dir):
@@ -28,7 +41,7 @@ def discover_k_values(run_dir):
 
 
 def is_correct(row):
-    return row["correct"].strip().lower() in TRUTHY
+    return row["correct"] == "1"
 
 
 def load_k(run_dir, k):

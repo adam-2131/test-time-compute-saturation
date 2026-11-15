@@ -61,13 +61,11 @@ class TestMcnemarExact:
 
 
 class TestIsCorrect:
-    @pytest.mark.parametrize("raw", ["1", "true", "True", " TRUE "])
-    def test_truthy_spellings(self, raw):
-        assert is_correct({"correct": raw}) is True
+    def test_one_is_correct(self):
+        assert is_correct({"correct": "1"}) is True
 
-    @pytest.mark.parametrize("raw", ["0", "false", "False", ""])
-    def test_falsy_spellings(self, raw):
-        assert is_correct({"correct": raw}) is False
+    def test_zero_is_wrong(self):
+        assert is_correct({"correct": "0"}) is False
 
 
 class TestDiscoverKValues:
