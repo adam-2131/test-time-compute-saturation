@@ -1,143 +1,138 @@
 # Parallel-Sampling
 
-Research codebase for **test-time compute scaling** experiments: measure how accuracy scales with parallel sampling on math problems.
+Code and data for my Maturitätsarbeit (Kantonsschule Zürich Nord, 2026):
+*Test-Time Compute Scaling through Parallel Sampling – A Controlled Empirical
+Study of Saturation in Self-Consistency.*
 
-**Core claim under investigation:** Test-time compute scaling via parallel sampling saturates after ~10× and yields diminishing accuracy gains.
+The question: if you ask a language model the same math problem k times and
+take the most frequent answer (majority voting / self-consistency), how much
+does accuracy improve as k grows from 1 to 1000?
 
-## Quickstart
+## Results
 
-### 1) Install
+300 problems per run, same subset for every k.
 
-Requires **Python 3.10+**.
+| k | AIME, gpt-4o-mini | GSM8K, gpt-4o-mini | AIME, gpt-4.1-mini |
+|---:|---:|---:|---:|
+| 1 | 21.3 % | 91.3 % | 24.7 % |
+| 10 | 26.3 % | 93.3 % | 31.0 % |
+| 100 | 27.0 % | 93.7 % | 35.7 % |
+| 1000 | 26.7 % | 93.7 % | 36.0 % |
+
+Almost all of the gain happens between k = 1 and k = 10 (for gpt-4.1-mini up
+to k = 100). After that, more samples cost a lot more and change nothing
+measurable. With early stopping, a budget of k = 1000 used on average only
+74 samples per problem on AIME and 18 on GSM8K.
+
+## Setup
+
+Python 3.10 or newer.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2) Set `OPENAI_API_KEY`
+An OpenAI API key is only needed for answers that are not in the cache yet:
 
 ```bash
-# macOS/Linux
-export OPENAI_API_KEY="..."
-
-# Windows PowerShell
-$env:OPENAI_API_KEY="..."
+export OPENAI_API_KEY="..."        # macOS/Linux
+$env:OPENAI_API_KEY="..."          # Windows PowerShell
 ```
 
-### 3) Run the fixed-k experiment
+## Running the experiments
 
 ```bash
-python main.py --method fixed_k_majority
-```
-
-This runs the primary experiment:
-- Samples k ∈ {1, 10, 100, 1000} completions per problem
-- Uses majority voting for aggregation
-- Applies early stopping (confidence ≥ 0.95 or stable majority for 50 samples)
-- Outputs per-example CSVs to `experiments/k_*.csv`
-
-### 4) Generate plots
-
-```bash
-python scripts/plot_frontier.py
-```
-
-Produces:
-- `plots/accuracy_vs_k.png` — Accuracy vs compute (log scale)
-- `plots/marginal_gain.png` — Marginal gains per 10× compute
-- `plots/effective_compute.png` — Early stopping savings
-
-## Experiment Details
-
-### Fixed-k Majority Voting (Primary)
-
-```bash
+# AIME, gpt-4o-mini
 python main.py --method fixed_k_majority \
-    --k-values 1,10,100,1000 \
-    --subset-size 300 \
-    --subset-seed 123 \
-    --early-stop-stability 50 \
-    --early-stop-confidence 0.95
+    --dataset-path data/aime.jsonl --model gpt-4o-mini \
+    --per-example-dir experiments
+
+# GSM8K, gpt-4o-mini
+python main.py --method fixed_k_majority \
+    --dataset-path data/gsm8k.jsonl --model gpt-4o-mini \
+    --per-example-dir experiments_gsm8k
+
+# AIME, gpt-4.1-mini
+python main.py --method fixed_k_majority \
+    --dataset-path data/aime.jsonl --model gpt-4.1-mini \
+    --per-example-dir experiments_aime_41mini
 ```
 
-**Output format** (`experiments/k_*.csv`):
+Each run writes one CSV per k value (`k_1.csv`, `k_10.csv`, ...) with the
+columns
+
 ```
 example_id,k_max,k_used,prediction,confidence,entropy,correct,runtime_seconds
 ```
 
-### Key parameters
+Main options (defaults in brackets):
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--k-values` | 1,10,100,1000 | Sample counts to evaluate |
-| `--subset-size` | 300 | Fixed evaluation subset size |
-| `--subset-seed` | 123 | Seed for deterministic subset selection |
-| `--early-stop-stability` | 50 | Stop if majority unchanged for N samples |
-| `--early-stop-confidence` | 0.95 | Stop if confidence ≥ threshold |
+| Option | Default | Meaning |
+|---|---|---|
+| `--k-values` | 1,10,100,1000 | sample budgets to run |
+| `--subset-size` | 300 | number of problems |
+| `--subset-seed` | 123 | seed for choosing the subset |
+| `--seed` | 0 | base seed, every API call gets its own seed derived from it |
+| `--early-stop-confidence` | 0.95 | stop when the majority answer has this share of the votes |
+| `--early-stop-stability` | 50 | stop when the majority answer hasn't changed for this many samples |
+| `--early-stop-min-samples` | 10 | number of samples before either rule is checked |
+| `--max-workers` | 32 | problems processed in parallel |
 
-## Repository Structure
+Temperature (0.7) and the token limit (2048) are fixed in `main.py`.
 
-```
-├── main.py              # Experiment runner
-├── eval.py              # Sampling and aggregation logic
-├── data.py              # Dataset loading
-├── parse.py             # Answer extraction
-├── prompting.py         # Prompt formatting
-├── utils.py             # OpenAI API wrapper with caching
-│
-├── scripts/
-│   ├── plot_frontier.py     # Generate accuracy/compute plots
-│   └── build_aime_jsonl.py  # Build dataset from HuggingFace
-│
-├── data/
-│   └── aime.jsonl       # AIME math problems (933 problems)
-│
-├── experiments/         # Per-example CSVs (generated)
-│   └── k_*.csv
-│
-└── plots/               # Figures (generated)
-    ├── accuracy_vs_k.png
-    ├── marginal_gain.png
-    └── effective_compute.png
-```
-
-## Data Format
-
-`data/aime.jsonl` contains one JSON object per line:
-
-```json
-{"id": "1983-1", "problem": "Let x, y and z...", "answer": "60"}
-```
-
-To rebuild from HuggingFace:
-```bash
-pip install datasets
-python scripts/build_aime_jsonl.py
-```
-
-## Caching
-
-Model responses are cached in `.cache/` (gitignored). Cache keys include `(model, temperature, max_tokens, prompt, seed)`. Delete `.cache/` to force fresh API calls.
-
-## Legacy Methods
-
-The repo also contains legacy token-budgeted experiments (not the primary focus):
+## Plots and statistics
 
 ```bash
-# Token-budgeted uniform sampling
-python main.py --method uniform_best_of_n_budgeted --multipliers 1,10,100
-
-# Token-budgeted two-phase sampling  
-python main.py --method two_phase_budgeted_sampling --multipliers 1,10,100
+python scripts/plot_frontier.py                 # plots/ for the AIME run
+python scripts/plot_frontier.py --experiments-dir experiments_gsm8k --plots-dir plots_gsm8k
+python scripts/plot_comparisons.py              # plots_combined/
+python scripts/significance.py                  # McNemar test between neighbouring k
+python scripts/explain_dip.py                   # problems that flip between k = 100 and 1000
 ```
 
-These write to `results/scaling_results.csv` and `results/per_problem_results.jsonl`.
+## Tests
+
+```bash
+python -m pytest tests
+```
+
+The tests replace the API with a stub, so they run without a key.
+
+## Files
+
+```
+main.py          runs the experiment
+eval.py          sampling loop, majority vote, early stopping
+utils.py         OpenAI API call with cache and retries
+parse.py         extracts the final answer from a response
+prompting.py     the prompt
+data.py          loads a .jsonl problem set
+scripts/         plots, statistics, building the datasets
+tests/           pytest tests
+data/            aime.jsonl (933 problems), gsm8k.jsonl (1319 problems)
+experiments*/    results of the three runs
+plots*/          figures
+```
+
+## Data
+
+- AIME: [gneubig/aime-1983-2024](https://huggingface.co/datasets/gneubig/aime-1983-2024), rebuilt with `scripts/build_aime_jsonl.py`
+- GSM8K: [gsm8k](https://huggingface.co/datasets/gsm8k), test split, rebuilt with `scripts/build_gsm8k_jsonl.py`
 
 ## Limitations
 
-- **Single model family**: Results are specific to gpt-4o-mini
-- **Extraction noise**: Answer parsing can introduce errors
-- **No claim of general scaling laws**: Empirical observations only
+- Only two small models from the same provider.
+- Answers are compared as text, so `025` and `25` (or `4.00` and `4`) count as
+  different. This affects one AIME problem and ten GSM8K problems at every k,
+  so it shifts the curves but doesn't change their shape.
+- Answer extraction falls back to the last integer in the response if no
+  final answer is marked, which can pick the wrong number.
+
+## Note
+
+Parts of the code were written with the help of an AI coding assistant. The
+experiment design, the runs and the analysis are my own; see the "Tools Used"
+section of the thesis.
 
 ## License
 

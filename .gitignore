@@ -1,40 +1,17 @@
 __pycache__/
 *.py[cod]
-*$py.class
 
+# cached model responses (about 200 MB)
 .cache/
-.env
-.env.*
 
+.env
 .venv/
 venv/
-ENV/
 
 .pytest_cache/
-.mypy_cache/
 .ruff_cache/
+logs/
 
-# OS / editor
 .DS_Store
 Thumbs.db
-
-# Generated results (keep curated results tracked, ignore the live append-only log)
-results/scaling_results.csv
-
-# Submission / report artifacts (generated)
-results/report_bundle/
-
-# Paper build artifacts
-paper/build/
-paper/*.aux
-paper/*.bbl
-paper/*.bcf
-paper/*.blg
-paper/*.log
-paper/*.out
-paper/*.run.xml
-paper/*.toc
-
-# Streamlit cache
-dashboard/.streamlit/
-
+~$*

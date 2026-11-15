@@ -1,71 +1,64 @@
-#!/usr/bin/env python3
-"""
-Post-hoc plotting for fixed-k majority voting experiments.
+"""Plots for one fixed-k run, from the per-example CSVs it wrote.
 
-Reads per-example CSVs from experiments/k_*.csv and generates:
-  - plots/accuracy_vs_k.png
-  - plots/marginal_gain.png
-  - plots/effective_compute.png
-
-Usage:
     python scripts/plot_frontier.py
+    python scripts/plot_frontier.py --experiments-dir experiments_gsm8k --plots-dir plots_gsm8k
 """
 
 from __future__ import annotations
 
-import os
+import argparse
 import sys
 from pathlib import Path
 
-# Ensure repo root is on path for imports
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
+import matplotlib
 import pandas as pd
-import matplotlib.pyplot as plt
 
-# Expected k values and paths
-EXPECTED_K_VALUES = [1, 10, 100, 1000]
-EXPERIMENTS_DIR = _REPO_ROOT / "experiments"
-PLOTS_DIR = _REPO_ROOT / "plots"
+matplotlib.use("Agg")  # only save files, no window
+import matplotlib.pyplot as plt  # noqa: E402
 
+from analysis import discover_k_values
 
-def load_experiment_data(k_values: list[int] = EXPECTED_K_VALUES) -> dict[int, pd.DataFrame]:
-    """
-    Load per-example CSVs for each k value.
-    
-    Raises FileNotFoundError with clear message if any expected CSV is missing.
-    """
-    data: dict[int, pd.DataFrame] = {}
-    missing: list[str] = []
-    
-    for k in k_values:
-        csv_path = EXPERIMENTS_DIR / f"k_{k}.csv"
-        if not csv_path.exists():
-            missing.append(str(csv_path))
-        else:
-            df = pd.read_csv(csv_path)
-            data[k] = df
-    
-    if missing:
-        raise FileNotFoundError(
-            f"Missing experiment CSVs. Run the fixed-k experiments first:\n"
-            f"  python main.py --method fixed_k_majority\n\n"
-            f"Missing files:\n  " + "\n  ".join(missing)
-        )
-    
-    return data
+plt.rcParams.update({
+    "figure.figsize": (9, 5.5),
+    "savefig.dpi": 200,
+    "font.size": 12,
+    "axes.titlesize": 15,
+    "axes.titleweight": "bold",
+    "axes.grid": True,
+    "grid.linestyle": "--",
+    "grid.alpha": 0.5,
+})
 
 
-def compute_summary_stats(data: dict[int, pd.DataFrame]) -> pd.DataFrame:
-    """
-    Compute summary statistics for each k value.
-    
-    Returns DataFrame with columns: k, accuracy, avg_k_used, avg_confidence, avg_entropy, n_examples
-    """
+def log_xlim(k_values):
+    # some room left and right so the outer labels are not cut off
+    return min(k_values) * 0.55, max(k_values) * 1.9
+
+
+def label_point(ax, x, y, text, *, dx=0, dy=12, ha="center", color="black"):
+    ax.annotate(
+        text,
+        (x, y),
+        textcoords="offset points",
+        xytext=(dx, dy),
+        ha=ha,
+        va="center",
+        fontsize=10,
+        color=color,
+        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.75),
+    )
+
+
+def load_experiment_data(experiments_dir):
+    return {
+        k: pd.read_csv(experiments_dir / f"k_{k}.csv")
+        for k in discover_k_values(experiments_dir)
+    }
+
+
+def summarize(data):
     rows = []
-    for k in sorted(data.keys()):
+    for k in sorted(data):
         df = data[k]
         rows.append({
             "k": k,
@@ -78,216 +71,134 @@ def compute_summary_stats(data: dict[int, pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def plot_accuracy_vs_k(summary: pd.DataFrame, output_path: Path) -> None:
-    """
-    Generate accuracy vs k plot (log scale x-axis).
-    """
-    fig, ax = plt.subplots(figsize=(8, 5))
-    
-    ax.plot(
-        summary["k"],
-        summary["accuracy"],
-        marker="o",
-        markersize=8,
-        linewidth=2,
-        color="#2563eb",
-        label="Accuracy",
-    )
-    
+def plot_accuracy_vs_k(summary, output_path):
+    k = summary["k"].tolist()
+    acc = summary["accuracy"].tolist()
+
+    fig, ax = plt.subplots()
+    ax.plot(k, acc, marker="o", markersize=9, linewidth=2.4, color="tab:blue", zorder=3)
+
     ax.set_xscale("log")
-    ax.set_xlabel("k (number of samples)", fontsize=12)
-    ax.set_ylabel("Accuracy", fontsize=12)
-    ax.set_title("Accuracy vs Compute (Fixed-k Majority Voting)", fontsize=14)
-    
-    # Set x-ticks to actual k values
-    ax.set_xticks(summary["k"].tolist())
-    ax.set_xticklabels([str(k) for k in summary["k"]])
-    
-    # Add grid
-    ax.grid(True, alpha=0.3, linestyle="--")
-    ax.set_ylim(0, 1.05)
-    
-    # Annotate points with accuracy values
-    for _, row in summary.iterrows():
-        ax.annotate(
-            f"{row['accuracy']:.3f}",
-            (row["k"], row["accuracy"]),
-            textcoords="offset points",
-            xytext=(0, 10),
-            ha="center",
-            fontsize=9,
-        )
-    
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    ax.set_xlabel("k (number of samples, log scale)")
+    ax.set_ylabel("Accuracy")
+    ax.set_title("Accuracy vs Compute")
+    ax.set_xticks(k)
+    ax.set_xticklabels([str(v) for v in k])
+    ax.set_xlim(*log_xlim(k))
+    ax.set_ylim(0, min(1.02, max(acc) + 0.18))
+
+    for i, (xv, yv) in enumerate(zip(k, acc)):
+        ha = "left" if i == 0 else ("right" if i == len(k) - 1 else "center")
+        dx = 6 if i == 0 else (-6 if i == len(k) - 1 else 0)
+        label_point(ax, xv, yv, f"{yv:.3f}", dx=dx, dy=14, ha=ha, color="tab:blue")
+
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"  -> {output_path}")
+    print(output_path)
 
 
-def plot_marginal_gain(summary: pd.DataFrame, output_path: Path) -> None:
-    """
-    Generate bar plot of marginal accuracy gains between consecutive k values.
-    """
-    # Compute marginal gains
-    k_values = summary["k"].tolist()
-    accuracies = summary["accuracy"].tolist()
-    
-    gains = []
-    labels = []
-    for i in range(1, len(k_values)):
-        gain = accuracies[i] - accuracies[i - 1]
-        gains.append(gain)
-        labels.append(f"{k_values[i]}−{k_values[i-1]}")
-    
-    fig, ax = plt.subplots(figsize=(8, 5))
-    
-    colors = ["#22c55e" if g > 0 else "#ef4444" for g in gains]
-    bars = ax.bar(labels, gains, color=colors, edgecolor="black", linewidth=0.5)
-    
-    ax.set_xlabel("k transition", fontsize=12)
-    ax.set_ylabel("Marginal accuracy gain", fontsize=12)
-    ax.set_title("Marginal Accuracy Gain per 10× Compute", fontsize=14)
-    
-    # Add horizontal line at y=0
-    ax.axhline(y=0, color="black", linewidth=0.8)
-    
-    # Add grid
-    ax.grid(True, alpha=0.3, linestyle="--", axis="y")
-    
-    # Annotate bars with values
-    for bar, gain in zip(bars, gains):
+def plot_marginal_gain(summary, output_path):
+    k = summary["k"].tolist()
+    acc = summary["accuracy"].tolist()
+
+    gains_pp = [(acc[i] - acc[i - 1]) * 100 for i in range(1, len(k))]
+    labels = [f"{k[i-1]} \u2192 {k[i]}" for i in range(1, len(k))]
+
+    fig, ax = plt.subplots()
+    colors = ["tab:green" if g > 0 else "tab:red" for g in gains_pp]
+    bars = ax.bar(labels, gains_pp, color=colors, edgecolor="#333333",
+                  linewidth=0.6, width=0.6, zorder=3)
+
+    ax.set_xlabel("k transition (10\u00d7 more compute)")
+    ax.set_ylabel("Marginal accuracy gain (percentage points)")
+    ax.set_title("Marginal Accuracy Gain per 10\u00d7 Compute")
+    ax.axhline(y=0, color="#333333", linewidth=1.0)
+    ax.grid(True, axis="y")
+    ax.grid(False, axis="x")
+
+    top = max(gains_pp + [0])
+    bottom = min(gains_pp + [0])
+    pad = max(0.6, (top - bottom) * 0.18)
+    ax.set_ylim(bottom - pad, top + pad)
+
+    for bar, g in zip(bars, gains_pp):
         height = bar.get_height()
         ax.annotate(
-            f"{gain:+.3f}",
+            f"{g:+.1f} pp",
             (bar.get_x() + bar.get_width() / 2, height),
             textcoords="offset points",
-            xytext=(0, 5 if height >= 0 else -15),
-            ha="center",
-            fontsize=10,
-            fontweight="bold",
+            xytext=(0, 8 if height >= 0 else -16),
+            ha="center", fontsize=11, fontweight="bold",
         )
-    
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"  -> {output_path}")
+    print(output_path)
 
 
-def plot_effective_compute(summary: pd.DataFrame, output_path: Path) -> None:
-    """
-    Generate plot of effective compute (avg_k_used) vs nominal k.
-    """
-    fig, ax = plt.subplots(figsize=(8, 5))
-    
-    # Plot avg_k_used
-    ax.plot(
-        summary["k"],
-        summary["avg_k_used"],
-        marker="s",
-        markersize=8,
-        linewidth=2,
-        color="#8b5cf6",
-        label="Avg k_used (actual)",
-    )
-    
-    # Plot diagonal (k_used = k) for reference
-    ax.plot(
-        summary["k"],
-        summary["k"],
-        linestyle="--",
-        linewidth=1.5,
-        color="#9ca3af",
-        label="k_used = k (no early stop)",
-    )
-    
+def plot_effective_compute(summary, output_path):
+    k = summary["k"].tolist()
+    used = summary["avg_k_used"].tolist()
+
+    fig, ax = plt.subplots()
+    ax.plot(k, k, linestyle="--", linewidth=1.6, color="grey",
+            label="No early stopping (k_used = k)", zorder=2)
+    ax.plot(k, used, marker="s", markersize=9, linewidth=2.4, color="tab:purple",
+            label="Actual samples used", zorder=3)
+
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("k_max (nominal)", fontsize=12)
-    ax.set_ylabel("avg_k_used (actual)", fontsize=12)
-    ax.set_title("Effective Compute: Early Stopping Savings", fontsize=14)
-    
-    # Set x-ticks to actual k values
-    ax.set_xticks(summary["k"].tolist())
-    ax.set_xticklabels([str(k) for k in summary["k"]])
-    
-    ax.legend(loc="upper left", fontsize=10)
-    ax.grid(True, alpha=0.3, linestyle="--")
-    
-    # Annotate with savings percentage
-    for _, row in summary.iterrows():
-        savings = (1 - row["avg_k_used"] / row["k"]) * 100
-        if row["k"] > 1:  # Skip k=1 annotation
-            ax.annotate(
-                f"{savings:.1f}% saved",
-                (row["k"], row["avg_k_used"]),
-                textcoords="offset points",
-                xytext=(10, -5),
-                ha="left",
-                fontsize=9,
-                color="#8b5cf6",
-            )
-    
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    ax.set_xlabel("k_max (nominal, log scale)")
+    ax.set_ylabel("Average samples used (log scale)")
+    ax.set_title("Effective Compute: Early-Stopping Savings")
+    ax.set_xticks(k)
+    ax.set_xticklabels([str(v) for v in k])
+    ax.set_xlim(*log_xlim(k))
+    ax.set_ylim(min(used) * 0.6, max(k) * 2.2)
+    ax.legend(loc="upper left")
+
+    # labels go below the points, between the line and the diagonal
+    for i, (xv, yv) in enumerate(zip(k, used)):
+        if xv == 1:
+            continue
+        savings = (1 - yv / xv) * 100
+        ha = "right" if i == len(k) - 1 else "center"
+        dx = -8 if i == len(k) - 1 else 0
+        label_point(ax, xv, yv, f"{savings:.0f}% saved", dx=dx, dy=-16, ha=ha, color="tab:purple")
+
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
-    print(f"  -> {output_path}")
+    print(output_path)
 
 
-def print_summary_table(summary: pd.DataFrame) -> None:
-    """
-    Print summary statistics table to stdout.
-    """
-    print()
-    print("=" * 70)
-    print("Fixed-k Majority Voting Summary Statistics")
-    print("=" * 70)
-    
-    header = f"{'k':>8}  {'accuracy':>10}  {'avg_k_used':>12}  {'avg_conf':>10}  {'n':>6}"
-    print(header)
-    print("-" * len(header))
-    
-    for _, row in summary.iterrows():
-        print(
-            f"{int(row['k']):>8}  "
-            f"{row['accuracy']:>10.4f}  "
-            f"{row['avg_k_used']:>12.2f}  "
-            f"{row['avg_confidence']:>10.4f}  "
-            f"{int(row['n_examples']):>6}"
-        )
-    
-    print()
+def main():
+    parser = argparse.ArgumentParser(description="Plot the results of one fixed-k run")
+    parser.add_argument("--experiments-dir", default="experiments")
+    parser.add_argument("--plots-dir", default="plots")
+    args = parser.parse_args()
 
-
-def main() -> None:
-    print("Loading experiment data...")
-    
-    # Load data
     try:
-        data = load_experiment_data()
+        data = load_experiment_data(Path(args.experiments_dir))
     except FileNotFoundError as e:
-        print(f"\nERROR: {e}", file=sys.stderr)
-        sys.exit(1)
-    
-    print(f"  Loaded {len(data)} experiment files")
-    
-    # Compute summary statistics
-    summary = compute_summary_stats(data)
-    
-    # Print summary table
-    print_summary_table(summary)
-    
-    # Create plots directory
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    
-    print("Generating plots...")
-    
-    # Generate plots
-    plot_accuracy_vs_k(summary, PLOTS_DIR / "accuracy_vs_k.png")
-    plot_marginal_gain(summary, PLOTS_DIR / "marginal_gain.png")
-    plot_effective_compute(summary, PLOTS_DIR / "effective_compute.png")
-    
+        sys.exit(f"{e}; run: python main.py --method fixed_k_majority")
+
+    summary = summarize(data)
+
+    print(f"{'k':>6}{'accuracy':>10}{'k_used':>9}{'conf':>7}{'n':>6}")
+    for _, row in summary.iterrows():
+        print(f"{int(row['k']):>6}{row['accuracy']:>10.4f}{row['avg_k_used']:>9.2f}"
+              f"{row['avg_confidence']:>7.3f}{int(row['n_examples']):>6}")
     print()
-    print(f"All plots saved to: {PLOTS_DIR}/")
+
+    plots_dir = Path(args.plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_accuracy_vs_k(summary, plots_dir / "accuracy_vs_k.png")
+    plot_marginal_gain(summary, plots_dir / "marginal_gain.png")
+    plot_effective_compute(summary, plots_dir / "effective_compute.png")
 
 
 if __name__ == "__main__":

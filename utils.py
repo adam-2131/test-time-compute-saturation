@@ -1,23 +1,42 @@
+"""OpenAI API wrapper with a disk cache and retries.
+
+Every answer is saved in .cache/ under a hash of the request, so running an
+experiment again reads from disk instead of paying for the API calls.
+
+Environment variables: OPENAI_REQUEST_TIMEOUT_S (default 120) and
+OPENAI_MAX_ATTEMPTS (default 8).
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
 import os
 import re
 import time
-from typing import Any, TypeVar
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from openai import (
-    OpenAI,
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
+    OpenAI,
     PermissionDeniedError,
     RateLimitError,
 )
-from pydantic import BaseModel
+
+CACHE_DIR = Path(".cache")
+
+# a 429 error message says how long to wait
+RETRY_AFTER = re.compile(r"try again in ([0-9.]+)s", re.IGNORECASE)
+
+
+class FatalModelError(RuntimeError):
+    """Errors where retrying makes no sense (wrong key, wrong model, no quota)."""
+
 
 @dataclass
 class ModelOutput:
@@ -25,259 +44,112 @@ class ModelOutput:
     completion_tokens: int | None
     prompt_tokens: int | None
     total_tokens: int | None
-    raw: object  # keep raw response for debugging
-
-TModel = TypeVar("TModel", bound=BaseModel)
 
 
-def call_model(
-    prompt: str,
-    *,
-    model: str = "gpt-4o-mini",
-    temperature: float = 0.7,
-    max_tokens: int = 2048,
-    seed: int | None = None,
-    cache_salt: int | None = None,
-) -> ModelOutput:
-    """
-    Single model call that returns:
-    - generated text
-    - token usage (needed for test-time compute accounting)
-    
-    Args:
-        seed: Optional seed for deterministic sampling (passed to OpenAI API)
-        cache_salt: Optional value included ONLY in the cache key. Useful for making
-            repeated samples with identical prompts independent without changing the
-            model-visible prompt/messages.
-    """
-    os.makedirs(".cache", exist_ok=True)
-    cache_key_payload = {
+def _cache_path(request):
+    key = json.dumps(request, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return CACHE_DIR / f"{hashlib.sha256(key.encode('utf-8')).hexdigest()}.json"
+
+
+def _load_cached(request):
+    path = _cache_path(request)
+    if not path.exists():
+        return None
+    return ModelOutput(**json.loads(path.read_text(encoding="utf-8")))
+
+
+def _store_cached(request, output):
+    CACHE_DIR.mkdir(exist_ok=True)
+    path = _cache_path(request)
+    # write to a temp file first, so a crash can't leave a half-written cache entry
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(asdict(output), ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _complete(client, request, max_attempts):
+    kwargs = {
+        "model": request["model"],
+        "messages": [{"role": "user", "content": request["prompt"]}],
+        "temperature": request["temperature"],
+        "max_tokens": request["max_tokens"],
+    }
+    if request["seed"] is not None:
+        kwargs["seed"] = request["seed"]
+
+    attempt = 0
+    while True:
+        try:
+            return client.chat.completions.create(**kwargs)
+
+        except AuthenticationError as err:
+            raise FatalModelError("OPENAI_API_KEY was rejected (HTTP 401)") from err
+        except PermissionDeniedError as err:
+            raise FatalModelError(
+                f"this key has no access to model '{request['model']}' (HTTP 403)"
+            ) from err
+        except BadRequestError as err:
+            raise FatalModelError(f"OpenAI rejected the request (HTTP 400): {err}") from err
+
+        except RateLimitError as err:
+            # the per-minute limit resets by itself, the daily one doesn't
+            if "requests per day" in str(err) or "RPD" in str(err):
+                raise FatalModelError(f"daily request quota exhausted: {err}") from err
+            attempt += 1
+            if attempt >= max_attempts:
+                raise
+            match = RETRY_AFTER.search(str(err))
+            time.sleep(float(match.group(1)) if match else 10.0)
+
+        except (APITimeoutError, APIConnectionError):
+            attempt += 1
+            if attempt >= max_attempts:
+                raise
+            time.sleep(min(2 ** attempt, 60))
+
+        except APIStatusError as err:
+            # only retry server errors (5xx), a 4xx would just fail again
+            status = getattr(err, "status_code", None)
+            if status is not None and status < 500:
+                raise
+            attempt += 1
+            if attempt >= max_attempts:
+                raise
+            time.sleep(min(2 ** attempt, 60))
+
+
+def call_model(prompt, *, model="gpt-4o-mini", temperature=0.7, max_tokens=2048, seed=None):
+    # The seed has to be part of the cache key. Otherwise all samples of a
+    # problem would get the same cached answer.
+    request = {
         "model": model,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "prompt": prompt,
         "seed": seed,
     }
-    if cache_salt is not None:
-        # Important: do NOT include this in the prompt/messages; it is cache-only.
-        # Also, omit entirely when None to preserve legacy cache keys.
-        cache_key_payload["cache_salt"] = cache_salt
-    cache_key_str = json.dumps(
-        cache_key_payload,
-        sort_keys=True,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    cache_key = hashlib.sha256(cache_key_str.encode("utf-8")).hexdigest()
-    cache_path = os.path.join(".cache", f"{cache_key}.json")
 
-    if os.path.exists(cache_path):
-        with open(cache_path, "r", encoding="utf-8") as f:
-            cached = json.load(f)
-        return ModelOutput(
-            text=cached.get("text", ""),
-            completion_tokens=cached.get("completion_tokens", None),
-            prompt_tokens=cached.get("prompt_tokens", None),
-            total_tokens=cached.get("total_tokens", None),
-            raw=None,
-        )
+    cached = _load_cached(request)
+    if cached is not None:
+        return cached
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set")
+        raise FatalModelError("OPENAI_API_KEY is not set")
 
-    client = OpenAI(api_key=api_key)
-
-    attempts = 0
-    max_attempts = 5
-    while True:
-        try:
-            api_kwargs: dict[str, Any] = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            }
-            if seed is not None:
-                api_kwargs["seed"] = seed
-            resp = client.chat.completions.create(**api_kwargs)
-            break
-        except AuthenticationError as e:
-            # Typically: missing/invalid/expired key.
-            raise RuntimeError(
-                "OpenAI authentication failed (HTTP 401). "
-                "Check that $env:OPENAI_API_KEY is set to a valid key for this machine/session."
-            ) from e
-        except PermissionDeniedError as e:
-            # Typically: key is valid, but not allowed to use the requested model/project.
-            raise RuntimeError(
-                "OpenAI permission denied (HTTP 403). "
-                f"Your key/project likely does not have access to model '{model}'.\n"
-                "Fixes:\n"
-                "  - Verify $env:OPENAI_API_KEY points to the right account/project.\n"
-                "  - Try a different model via main.py's --model flag (e.g. --model gpt-4o-mini).\n"
-                "  - Ensure billing/quotas are enabled for the project associated with the key."
-            ) from e
-        except BadRequestError as e:
-            # Often: invalid request params for the selected model (e.g., unsupported 'seed').
-            msg = str(e)
-            hint = ""
-            if "seed" in msg.lower():
-                hint = (
-                    "\nHint: this model may not support the 'seed' parameter. "
-                    "Try switching models with --model or (if needed) we can add a flag to disable seeding."
-                )
-            raise RuntimeError(f"OpenAI request rejected (HTTP 400): {msg}{hint}") from e
-        except (APITimeoutError, APIConnectionError) as e:
-            attempts += 1
-            if attempts >= max_attempts:
-                raise
-            wait_s = min(2 ** attempts, 60)  # exponential backoff, max 60s
-            time.sleep(wait_s)
-        except RateLimitError as e:
-            attempts += 1
-            msg = str(e)
-            if "requests per day" in msg or "RPD" in msg:
-                raise
-            if attempts >= max_attempts:
-                raise
-            m = re.search(r"try again in ([0-9.]+)s", str(e), flags=re.IGNORECASE)
-            wait_s = float(m.group(1)) if m else 10.0
-            time.sleep(wait_s)
-
-    text = resp.choices[0].message.content or ""
-
-    usage = getattr(resp, "usage", None)
-    completion = getattr(usage, "completion_tokens", None) if usage else None
-    prompt_toks = getattr(usage, "prompt_tokens", None) if usage else None
-    total = getattr(usage, "total_tokens", None) if usage else None
-
-    tmp_cache_path = cache_path + ".tmp"
-    with open(tmp_cache_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "text": text,
-                "completion_tokens": completion,
-                "prompt_tokens": prompt_toks,
-                "total_tokens": total,
-            },
-            f,
-            ensure_ascii=False,
-        )
-    os.replace(tmp_cache_path, cache_path)
-
-    return ModelOutput(
-        text=text,
-        completion_tokens=completion,
-        prompt_tokens=prompt_toks,
-        total_tokens=total,
-        raw=resp,
+    client = OpenAI(
+        api_key=api_key,
+        timeout=float(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "120")),
+        max_retries=0,  # retries are handled in _complete
     )
+    response = _complete(client, request, int(os.environ.get("OPENAI_MAX_ATTEMPTS", "8")))
 
-
-def _strip_json_fences(text: str) -> str:
-    """
-    Removes common markdown fences like:
-      ```json
-      {...}
-      ```
-    """
-    if not text:
-        return ""
-    s = text.strip()
-    s = re.sub(r"^\s*```(?:json)?\s*", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s*```\s*$", "", s)
-    return s.strip()
-
-
-def _extract_json_value(text: str) -> Any:
-    """
-    Best-effort JSON extraction for model outputs.
-    Tries full-string parse, then falls back to extracting the outermost {...} or [...].
-    """
-    s = _strip_json_fences(text)
-    if not s:
-        raise ValueError("empty response")
-
-    # Try strict parse first.
-    try:
-        return json.loads(s)
-    except json.JSONDecodeError:
-        pass
-
-    # Fallback: extract the largest JSON object/array region.
-    first_obj = s.find("{")
-    last_obj = s.rfind("}")
-    first_arr = s.find("[")
-    last_arr = s.rfind("]")
-
-    candidates: list[str] = []
-    if 0 <= first_obj < last_obj:
-        candidates.append(s[first_obj : last_obj + 1])
-    if 0 <= first_arr < last_arr:
-        candidates.append(s[first_arr : last_arr + 1])
-
-    for c in candidates:
-        try:
-            return json.loads(c)
-        except json.JSONDecodeError:
-            continue
-
-    raise ValueError("failed to parse JSON from response")
-
-
-def _schema_hint(model_cls: type[BaseModel]) -> str:
-    """
-    Returns a JSON schema string for both Pydantic v2 and v1.
-    """
-    if hasattr(model_cls, "model_json_schema"):  # pydantic v2
-        schema_obj = model_cls.model_json_schema()
-        return json.dumps(schema_obj, ensure_ascii=False, indent=2)
-    # pydantic v1 fallback
-    schema_obj = model_cls.schema()  # type: ignore[attr-defined]
-    return json.dumps(schema_obj, ensure_ascii=False, indent=2)
-
-
-def _validate_with_pydantic(model_cls: type[TModel], data: Any) -> TModel:
-    if hasattr(model_cls, "model_validate"):  # pydantic v2
-        return model_cls.model_validate(data)  # type: ignore[no-any-return]
-    return model_cls.parse_obj(data)  # type: ignore[attr-defined,no-any-return]
-
-
-def sample(
-    prompt: str,
-    model_cls: type[TModel],
-    *,
-    model: str = "gpt-4o-mini",
-    temperature: float = 0.7,
-    max_tokens: int = 2048,
-    max_attempts: int = 3,
-) -> TModel:
-    """
-    Sample a *JSON-only* response and validate it against a Pydantic model.
-    This is intentionally minimal (no tool calling) to keep the repo lightweight.
-    """
-    schema = _schema_hint(model_cls)
-    instruction = (
-        "Return ONLY valid JSON (no markdown, no code fences, no commentary). "
-        "The JSON MUST validate against this schema:\n"
-        f"{schema}"
+    usage = getattr(response, "usage", None)
+    output = ModelOutput(
+        text=response.choices[0].message.content or "",
+        completion_tokens=getattr(usage, "completion_tokens", None),
+        prompt_tokens=getattr(usage, "prompt_tokens", None),
+        total_tokens=getattr(usage, "total_tokens", None),
     )
-    full_prompt = f"{prompt}\n\n{instruction}\n"
-
-    last_err: Exception | None = None
-    for _ in range(max_attempts):
-        try:
-            out = call_model(
-                full_prompt,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            data = _extract_json_value(out.text)
-            return _validate_with_pydantic(model_cls, data)
-        except Exception as e:  # noqa: BLE001 - surface a clean error after retries
-            last_err = e
-            continue
-
-    raise RuntimeError(f"Failed to sample valid JSON for {model_cls.__name__}: {last_err}")
+    _store_cached(request, output)
+    return output

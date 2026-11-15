@@ -1,7 +1,11 @@
 openai>=1.0.0
-pydantic>=2.0.0
-tqdm>=4.66.0
-termcolor>=2.4.0
 
-# Dev / debugging (optional)
-ipdb>=0.13.13
+# Plotting and analysis scripts
+pandas>=2.0.0
+matplotlib>=3.7.0
+
+# Rebuilding data/*.jsonl from Hugging Face (scripts/build_*_jsonl.py)
+datasets>=2.14.0
+
+# Tests
+pytest>=7.4.0

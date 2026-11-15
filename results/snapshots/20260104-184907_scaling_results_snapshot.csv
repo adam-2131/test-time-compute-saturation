@@ -1,3 +1,0 @@
-run_id,date,model,dataset,method,compute_multiplier,pass_at_k_accuracy,majority_vote_accuracy,total_decoded_tokens,total_completion_tokens_used,total_tokens_used,num_problems,notes
-20260104-184907,2026-01-04,gpt-4o-mini,aime,uniform_best_of_n_budgeted,1,0.3,0.3,23016,23016,26297,50,subset=50 seed=0 cap_hit_rate=0.0000 cap_hits=0 calls=81
-20260104-184907,2026-01-04,gpt-4o-mini,aime,uniform_best_of_n_budgeted,10,0.7,0.46,479380,479380,545848,50,subset=50 seed=0 cap_hit_rate=0.0100 cap_hits=6 calls=598

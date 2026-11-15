@@ -1,41 +1,34 @@
-"""
-Build `data/aime.jsonl` from the Hugging Face dataset `gneubig/aime-1983-2024`.
+"""Build data/aime.jsonl from the Hugging Face dataset gneubig/aime-1983-2024.
 
-Each output line is a JSON object:
-  {"id": <string>, "problem": <string>, "answer": <string>}
-
-Run:
-  python scripts/build_aime_jsonl.py
+One JSON object per line: {"id": ..., "problem": ..., "answer": ...}
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict
-
 from datasets import load_dataset
 
 
-def _first_present(row: Dict[str, Any], keys: list[str]) -> Any:
+# the column names differ between versions of the dataset
+def _first_present(row, keys):
     for k in keys:
         if k in row and row[k] is not None:
             return row[k]
     return None
 
 
-def _stable_id(row: Dict[str, Any], idx: int) -> str:
-    # Prefer explicit dataset ID if present.
+def _stable_id(row, idx):
     explicit = _first_present(row, ["ID", "id"])
     if explicit is not None and str(explicit).strip():
         return str(explicit).strip()
 
-    # Otherwise synthesize from year / problem number / part if present.
+    # no id column: build one from year, problem number and part
     year = _first_present(row, ["Year", "year"])
     prob = _first_present(row, ["Problem Number", "problem_number", "problem"])
     part = _first_present(row, ["Part", "part"])
 
-    pieces: list[str] = []
+    pieces = []
     if year is not None:
         pieces.append(str(year).strip())
     if prob is not None:
@@ -48,7 +41,7 @@ def _stable_id(row: Dict[str, Any], idx: int) -> str:
     return str(idx)
 
 
-def main() -> None:
+def main():
     ds = load_dataset("gneubig/aime-1983-2024")
     split = ds["train"] if isinstance(ds, dict) and "train" in ds else next(iter(ds.values()))
 
@@ -73,16 +66,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
