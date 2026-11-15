@@ -1,10 +1,3 @@
-"""Fixed-k majority voting: sample a problem up to k times and take the most
-frequent answer.
-
-Sampling stops early once the majority is confident enough or has stopped
-changing. Both rules only apply after a minimum number of draws, because a
-single sample always has confidence 1.0.
-"""
 
 from __future__ import annotations
 
@@ -18,19 +11,17 @@ from parse import extract_final_answer
 from prompting import format_math_prompt
 from utils import FatalModelError, call_model
 
+
 PROBLEM_ATTEMPTS = 5
 
 
 def _derive_seed(base_seed, *, problem_index, call_index, tag):
-    # Hashed instead of counted, so adding another k value later does not
-    # change the seeds (and cached answers) of the existing draws.
     data = f"{base_seed}:{problem_index}:{call_index}:{tag}".encode()
-    # the API only accepts a signed 32-bit seed
     return int.from_bytes(hashlib.sha256(data).digest()[:4], "big") & 0x7FFFFFFF
 
 
 def majority_stats(answers):
-    valid_answers = [answer for answer in answers if answer is not None]
+    valid_answers = [a for a in answers if a is not None]
 
     if not valid_answers:
         return None, 0.0, 0.0
@@ -50,8 +41,11 @@ def majority_stats(answers):
     return prediction, max_count / total, entropy
 
 
-def _vote(p_idx, problem, *, model, temperature, max_tokens, k_max, seed,
-          min_samples, early_stop_stability, early_stop_confidence):
+def _vote(
+    p_idx, problem, *, model, temperature, max_tokens,
+    k_max, seed, min_samples, early_stop_stability,
+    early_stop_confidence
+):
     start = time.perf_counter()
     prompt = format_math_prompt(problem["problem"])
     gold = str(problem["answer"]).strip()
@@ -67,8 +61,10 @@ def _vote(p_idx, problem, *, model, temperature, max_tokens, k_max, seed,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
-            seed=_derive_seed(seed, problem_index=p_idx,
-                              call_index=call_idx, tag="fixed_k"),
+            seed=_derive_seed(
+                seed, problem_index=p_idx,
+                call_index=call_idx, tag="fixed_k"
+            ),
         )
 
         answers.append(extract_final_answer(result.text))
@@ -92,6 +88,7 @@ def _vote(p_idx, problem, *, model, temperature, max_tokens, k_max, seed,
         previous_majority = majority
 
     prediction, confidence, entropy = majority_stats(answers)
+
     return {
         "example_id": problem["id"],
         "k_max": k_max,
@@ -104,16 +101,17 @@ def _vote(p_idx, problem, *, model, temperature, max_tokens, k_max, seed,
     }
 
 
-def run_fixed_k_majority(problems, model, temperature, max_tokens, k_max, *,
-                         seed=0, early_stop_stability=50, early_stop_confidence=0.95,
-                         early_stop_min_samples=10, max_workers=1, progress=False):
+def run_fixed_k_majority(
+    problems, model, temperature, max_tokens, k_max, *,
+    seed=0, early_stop_stability=50, early_stop_confidence=0.95,
+    early_stop_min_samples=10, max_workers=1, progress=False
+):
     min_samples = max(1, min(early_stop_min_samples, k_max))
     n = len(problems)
 
     def vote(p_idx, problem):
-        # If a problem fails halfway, start it again. The draws that already
-        # worked come back from the cache, so this costs almost nothing.
         last_error = None
+
         for attempt in range(PROBLEM_ATTEMPTS):
             try:
                 return _vote(
@@ -140,19 +138,26 @@ def run_fixed_k_majority(problems, model, temperature, max_tokens, k_max, *,
 
     if max_workers <= 1:
         results = []
+
         for p_idx, problem in enumerate(problems):
             results.append(vote(p_idx, problem))
+
             if progress:
                 print(f"  {len(results)}/{n}", flush=True)
+
         return results
 
-    # Results are stored by index so the CSV keeps the input order, no matter
-    # which problems finish first.
     results = [None] * n
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(vote, i, p): i for i, p in enumerate(problems)}
+        futures = {
+            pool.submit(vote, i, p): i
+            for i, p in enumerate(problems)
+        }
+
         for done, future in enumerate(as_completed(futures), start=1):
             results[futures[future]] = future.result()
+
             if progress:
                 print(f"  {done}/{n}", flush=True)
 

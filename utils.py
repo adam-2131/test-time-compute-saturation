@@ -1,13 +1,3 @@
-"""OpenAI API wrapper with a disk cache and retries.
-
-Every answer is saved in .cache/ under a hash of the request, so running an
-experiment again reads from disk instead of paying for the API calls.
-
-Environment variables: OPENAI_REQUEST_TIMEOUT_S (default 120) and
-OPENAI_MAX_ATTEMPTS (default 8).
-"""
-
-from __future__ import annotations
 
 import hashlib
 import json
@@ -29,13 +19,11 @@ from openai import (
 )
 
 CACHE_DIR = Path(".cache")
-
-# a 429 error message says how long to wait
 RETRY_AFTER = re.compile(r"try again in ([0-9.]+)s", re.IGNORECASE)
 
 
 class FatalModelError(RuntimeError):
-    """Errors where retrying makes no sense (wrong key, wrong model, no quota)."""
+    pass
 
 
 @dataclass
@@ -55,14 +43,15 @@ def _load_cached(request):
     path = _cache_path(request)
     if not path.exists():
         return None
+
     return ModelOutput(**json.loads(path.read_text(encoding="utf-8")))
 
 
 def _store_cached(request, output):
     CACHE_DIR.mkdir(exist_ok=True)
     path = _cache_path(request)
-    # write to a temp file first, so a crash can't leave a half-written cache entry
     tmp = path.with_suffix(".tmp")
+
     tmp.write_text(json.dumps(asdict(output), ensure_ascii=False), encoding="utf-8")
     tmp.replace(path)
 
@@ -74,53 +63,51 @@ def _complete(client, request, max_attempts):
         "temperature": request["temperature"],
         "max_tokens": request["max_tokens"],
     }
+
     if request["seed"] is not None:
         kwargs["seed"] = request["seed"]
 
-    attempt = 0
-    while True:
+    for attempt in range(max(1, max_attempts)):
         try:
             return client.chat.completions.create(**kwargs)
 
         except AuthenticationError as err:
             raise FatalModelError("OPENAI_API_KEY was rejected (HTTP 401)") from err
+
         except PermissionDeniedError as err:
             raise FatalModelError(
                 f"this key has no access to model '{request['model']}' (HTTP 403)"
             ) from err
+
         except BadRequestError as err:
             raise FatalModelError(f"OpenAI rejected the request (HTTP 400): {err}") from err
 
-        except RateLimitError as err:
-            # the per-minute limit resets by itself, the daily one doesn't
-            if "requests per day" in str(err) or "RPD" in str(err):
-                raise FatalModelError(f"daily request quota exhausted: {err}") from err
-            attempt += 1
-            if attempt >= max_attempts:
-                raise
-            match = RETRY_AFTER.search(str(err))
-            time.sleep(float(match.group(1)) if match else 10.0)
+        except (RateLimitError, APITimeoutError, APIConnectionError, APIStatusError) as err:
+            if isinstance(err, RateLimitError):
+                if "requests per day" in str(err) or "RPD" in str(err):
+                    raise FatalModelError(f"daily request quota exhausted: {err}") from err
 
-        except (APITimeoutError, APIConnectionError):
-            attempt += 1
-            if attempt >= max_attempts:
-                raise
-            time.sleep(min(2 ** attempt, 60))
+                match = RETRY_AFTER.search(str(err))
+                delay = float(match.group(1)) if match else 10.0
 
-        except APIStatusError as err:
-            # only retry server errors (5xx), a 4xx would just fail again
-            status = getattr(err, "status_code", None)
-            if status is not None and status < 500:
+            else:
+                if isinstance(err, APIStatusError):
+                    status = getattr(err, "status_code", None)
+                    if status is not None and status < 500:
+                        raise
+
+                delay = min(2 ** (attempt + 1), 60)
+
+            if attempt + 1 >= max_attempts:
                 raise
-            attempt += 1
-            if attempt >= max_attempts:
-                raise
-            time.sleep(min(2 ** attempt, 60))
+
+            time.sleep(delay)
 
 
-def call_model(prompt, *, model="gpt-4o-mini", temperature=0.7, max_tokens=2048, seed=None):
-    # The seed has to be part of the cache key. Otherwise all samples of a
-    # problem would get the same cached answer.
+def call_model(
+    prompt, *, model="gpt-4o-mini", temperature=0.7,
+    max_tokens=2048, seed=None
+):
     request = {
         "model": model,
         "temperature": temperature,
@@ -140,16 +127,23 @@ def call_model(prompt, *, model="gpt-4o-mini", temperature=0.7, max_tokens=2048,
     client = OpenAI(
         api_key=api_key,
         timeout=float(os.environ.get("OPENAI_REQUEST_TIMEOUT_S", "120")),
-        max_retries=0,  # retries are handled in _complete
+        max_retries=0,
     )
-    response = _complete(client, request, int(os.environ.get("OPENAI_MAX_ATTEMPTS", "8")))
+
+    response = _complete(
+        client,
+        request,
+        int(os.environ.get("OPENAI_MAX_ATTEMPTS", "8")),
+    )
 
     usage = getattr(response, "usage", None)
+
     output = ModelOutput(
         text=response.choices[0].message.content or "",
         completion_tokens=getattr(usage, "completion_tokens", None),
         prompt_tokens=getattr(usage, "prompt_tokens", None),
         total_tokens=getattr(usage, "total_tokens", None),
     )
+
     _store_cached(request, output)
     return output

@@ -1,11 +1,3 @@
-"""Runs the fixed-k majority voting experiment.
-
-    python main.py --method fixed_k_majority
-    python main.py --method fixed_k_majority \
-        --dataset-path data/gsm8k.jsonl --per-example-dir experiments_gsm8k
-
-Writes one k_<k>.csv per k value into --per-example-dir.
-"""
 
 from __future__ import annotations
 
@@ -17,6 +9,7 @@ from statistics import fmean
 
 from data import load_jsonl_dataset
 from eval import run_fixed_k_majority
+
 
 DEFAULT_MODEL = "gpt-4o-mini"
 TEMPERATURE = 0.7
@@ -39,14 +32,13 @@ def parse_int_list(s):
 
 
 def select_subset(problems, subset_size, subset_seed):
-    # Same seed -> same problems for every k, otherwise an easier subset
-    # could look like an effect of more samples.
     if len(problems) <= subset_size:
         return problems
 
     rng = random.Random(subset_seed)
     indices = list(range(len(problems)))
     rng.shuffle(indices)
+
     return [problems[i] for i in sorted(indices[:subset_size])]
 
 
@@ -54,6 +46,7 @@ def write_csv(path, results):
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=COLUMNS)
         writer.writeheader()
+
         for r in results:
             writer.writerow({
                 "example_id": r["example_id"],
@@ -69,8 +62,11 @@ def write_csv(path, results):
 
 def run_fixed_k(args):
     problems = select_subset(
-        load_jsonl_dataset(args.dataset_path), args.subset_size, args.subset_seed
+        load_jsonl_dataset(args.dataset_path),
+        args.subset_size,
+        args.subset_seed,
     )
+
     if not problems:
         raise ValueError(f"no problems loaded from {args.dataset_path}")
 
@@ -80,13 +76,17 @@ def run_fixed_k(args):
 
     print(f"fixed-k majority voting on {Path(args.dataset_path).stem}, model {args.model}")
     print(f"{len(problems)} problems (subset_seed={args.subset_seed}), k = {k_values}")
-    print(f"early stop: confidence {args.early_stop_confidence}, "
-          f"stability {args.early_stop_stability}, "
-          f"min samples {args.early_stop_min_samples}\n")
+    print(
+        f"early stop: confidence {args.early_stop_confidence}, "
+        f"stability {args.early_stop_stability}, "
+        f"min samples {args.early_stop_min_samples}\n"
+    )
 
     summary = []
+
     for k in k_values:
         print(f"k_max={k}")
+
         results = run_fixed_k_majority(
             problems,
             args.model,
@@ -114,12 +114,14 @@ def run_fixed_k(args):
         ))
 
     print(f"\n{'k_max':>6}{'accuracy':>10}{'k_used':>9}{'conf':>7}{'seconds':>9}")
+
     for k, accuracy, k_used, confidence, runtime in summary:
         print(f"{k:>6}{accuracy:>10.4f}{k_used:>9.2f}{confidence:>7.3f}{runtime:>9.1f}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Fixed-k majority voting experiment")
+
     parser.add_argument("--method", default="fixed_k_majority", choices=["fixed_k_majority"])
     parser.add_argument("--dataset-path", default="data/aime.jsonl")
     parser.add_argument("--model", default=DEFAULT_MODEL)

@@ -1,10 +1,3 @@
-"""Plots for one fixed-k run, from the per-example CSVs it wrote.
-
-    python scripts/plot_frontier.py
-    python scripts/plot_frontier.py --experiments-dir experiments_gsm8k --plots-dir plots_gsm8k
-"""
-
-from __future__ import annotations
 
 import argparse
 import sys
@@ -13,7 +6,7 @@ from pathlib import Path
 import matplotlib
 import pandas as pd
 
-matplotlib.use("Agg")  # only save files, no window
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from analysis import PLOT_STYLE, discover_k_values, log_xlim
@@ -44,6 +37,7 @@ def load_experiment_data(experiments_dir):
 
 def summarize(data):
     rows = []
+
     for k in sorted(data):
         df = data[k]
         rows.append({
@@ -53,6 +47,7 @@ def summarize(data):
             "avg_confidence": df["confidence"].mean(),
             "n_examples": len(df),
         })
+
     return pd.DataFrame(rows)
 
 
@@ -61,7 +56,11 @@ def plot_accuracy_vs_k(summary, output_path):
     acc = summary["accuracy"].tolist()
 
     fig, ax = plt.subplots()
-    ax.plot(k, acc, marker="o", markersize=9, linewidth=2.4, color="tab:blue", zorder=3)
+    ax.plot(
+        k, acc,
+        marker="o", markersize=9, linewidth=2.4,
+        color="tab:blue", zorder=3,
+    )
 
     ax.set_xscale("log")
     ax.set_xlabel("k (number of samples, log scale)")
@@ -73,9 +72,17 @@ def plot_accuracy_vs_k(summary, output_path):
     ax.set_ylim(0, min(1.02, max(acc) + 0.18))
 
     for i, (xv, yv) in enumerate(zip(k, acc)):
-        ha = "left" if i == 0 else ("right" if i == len(k) - 1 else "center")
-        dx = 6 if i == 0 else (-6 if i == len(k) - 1 else 0)
-        label_point(ax, xv, yv, f"{yv:.3f}", dx=dx, dy=14, ha=ha, color="tab:blue")
+        if i == 0:
+            ha, dx = "left", 6
+        elif i == len(k) - 1:
+            ha, dx = "right", -6
+        else:
+            ha, dx = "center", 0
+
+        label_point(
+            ax, xv, yv, f"{yv:.3f}",
+            dx=dx, dy=14, ha=ha, color="tab:blue",
+        )
 
     fig.tight_layout()
     fig.savefig(output_path, bbox_inches="tight")
@@ -88,16 +95,20 @@ def plot_marginal_gain(summary, output_path):
     acc = summary["accuracy"].tolist()
 
     gains_pp = [(acc[i] - acc[i - 1]) * 100 for i in range(1, len(k))]
-    labels = [f"{k[i-1]} \u2192 {k[i]}" for i in range(1, len(k))]
+    labels = [f"{k[i-1]} → {k[i]}" for i in range(1, len(k))]
 
     fig, ax = plt.subplots()
     colors = ["tab:green" if g > 0 else "tab:red" for g in gains_pp]
-    bars = ax.bar(labels, gains_pp, color=colors, edgecolor="#333333",
-                  linewidth=0.6, width=0.6, zorder=3)
 
-    ax.set_xlabel("k transition (10\u00d7 more compute)")
+    bars = ax.bar(
+        labels, gains_pp,
+        color=colors, edgecolor="#333333",
+        linewidth=0.6, width=0.6, zorder=3,
+    )
+
+    ax.set_xlabel("k transition (10× more compute)")
     ax.set_ylabel("Marginal accuracy gain (percentage points)")
-    ax.set_title("Marginal Accuracy Gain per 10\u00d7 Compute")
+    ax.set_title("Marginal Accuracy Gain per 10× Compute")
     ax.axhline(y=0, color="#333333", linewidth=1.0)
     ax.grid(True, axis="y")
     ax.grid(False, axis="x")
@@ -109,12 +120,15 @@ def plot_marginal_gain(summary, output_path):
 
     for bar, g in zip(bars, gains_pp):
         height = bar.get_height()
+
         ax.annotate(
             f"{g:+.1f} pp",
             (bar.get_x() + bar.get_width() / 2, height),
             textcoords="offset points",
             xytext=(0, 8 if height >= 0 else -16),
-            ha="center", fontsize=11, fontweight="bold",
+            ha="center",
+            fontsize=11,
+            fontweight="bold",
         )
 
     fig.tight_layout()
@@ -128,10 +142,17 @@ def plot_effective_compute(summary, output_path):
     used = summary["avg_k_used"].tolist()
 
     fig, ax = plt.subplots()
-    ax.plot(k, k, linestyle="--", linewidth=1.6, color="grey",
-            label="No early stopping (k_used = k)", zorder=2)
-    ax.plot(k, used, marker="s", markersize=9, linewidth=2.4, color="tab:purple",
-            label="Actual samples used", zorder=3)
+
+    ax.plot(
+        k, k,
+        linestyle="--", linewidth=1.6, color="grey",
+        label="No early stopping (k_used = k)", zorder=2,
+    )
+    ax.plot(
+        k, used,
+        marker="s", markersize=9, linewidth=2.4,
+        color="tab:purple", label="Actual samples used", zorder=3,
+    )
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -144,14 +165,18 @@ def plot_effective_compute(summary, output_path):
     ax.set_ylim(min(used) * 0.6, max(k) * 2.2)
     ax.legend(loc="upper left")
 
-    # labels go below the points, between the line and the diagonal
     for i, (xv, yv) in enumerate(zip(k, used)):
         if xv == 1:
             continue
+
         savings = (1 - yv / xv) * 100
         ha = "right" if i == len(k) - 1 else "center"
         dx = -8 if i == len(k) - 1 else 0
-        label_point(ax, xv, yv, f"{savings:.0f}% saved", dx=dx, dy=-16, ha=ha, color="tab:purple")
+
+        label_point(
+            ax, xv, yv, f"{savings:.0f}% saved",
+            dx=dx, dy=-16, ha=ha, color="tab:purple",
+        )
 
     fig.tight_layout()
     fig.savefig(output_path, bbox_inches="tight")
@@ -173,9 +198,14 @@ def main():
     summary = summarize(data)
 
     print(f"{'k':>6}{'accuracy':>10}{'k_used':>9}{'conf':>7}{'n':>6}")
+
     for _, row in summary.iterrows():
-        print(f"{int(row['k']):>6}{row['accuracy']:>10.4f}{row['avg_k_used']:>9.2f}"
-              f"{row['avg_confidence']:>7.3f}{int(row['n_examples']):>6}")
+        print(
+            f"{int(row['k']):>6}{row['accuracy']:>10.4f}"
+            f"{row['avg_k_used']:>9.2f}{row['avg_confidence']:>7.3f}"
+            f"{int(row['n_examples']):>6}"
+        )
+
     print()
 
     plots_dir = Path(args.plots_dir)

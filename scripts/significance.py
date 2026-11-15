@@ -1,15 +1,9 @@
-"""McNemar test between each pair of neighbouring k values.
-
-    python scripts/significance.py
-    python scripts/significance.py experiments_gsm8k
-"""
-
-from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
 from analysis import accuracy, flips, load_run, mcnemar_exact
+
 
 ALPHA = 0.05
 
@@ -29,14 +23,18 @@ def main():
     for lo, hi in zip(ks, ks[1:]):
         acc_lo = accuracy(by_k[lo], shared)
         acc_hi = accuracy(by_k[hi], shared)
+
         lost, won = flips(by_k[lo], by_k[hi], shared)
         p = mcnemar_exact(len(lost), len(won))
 
         verdict = "significant" if p < ALPHA else "not significant"
-        print(f"k={lo:<4}-> k={hi:<7}"
-              f"{100 * acc_lo:5.1f}% -> {100 * acc_hi:5.1f}%"
-              f"{100 * (acc_hi - acc_lo):+8.2f}{len(won):>8}{len(lost):>8}"
-              f"{p:>9.4f}   {verdict}")
+
+        print(
+            f"k={lo:<4}-> k={hi:<7}"
+            f"{100 * acc_lo:5.1f}% -> {100 * acc_hi:5.1f}%"
+            f"{100 * (acc_hi - acc_lo):+8.2f}{len(won):>8}{len(lost):>8}"
+            f"{p:>9.4f}   {verdict}"
+        )
 
 
 if __name__ == "__main__":
