@@ -1,13 +1,13 @@
 cff-version: 1.2.0
 message: "If you use this code, please cite it as below."
-title: "Parallel-Sampling"
+title: "test-time-compute-saturation"
 type: software
 authors:
   - family-names: "Zaremba"
     given-names: "Adam"
 date-released: "2026-11-15"
 license: MIT
-repository-code: "https://github.com/adam-2131/Parallel-Sampling"
+repository-code: "https://github.com/adam-2131/test-time-compute-saturation"
 keywords:
   - large language models
   - test-time compute

@@ -1,4 +1,4 @@
-# Parallel-Sampling
+# test-time-compute-saturation
 
 Code and data for my Maturitätsarbeit (Kantonsschule Zürich Nord, 2026):
 *Test-Time Compute Scaling through Parallel Sampling – A Controlled Empirical
