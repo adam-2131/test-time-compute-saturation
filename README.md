@@ -10,19 +10,26 @@ does accuracy improve as k grows from 1 to 1000?
 
 ## Results
 
-300 problems per run, same subset for every k.
+Final runs: 300 problems per run, same subset for every k, token limit 16384.
 
 | k | AIME, gpt-4o-mini | GSM8K, gpt-4o-mini | AIME, gpt-4.1-mini |
 |---:|---:|---:|---:|
-| 1 | 21.3 % | 91.3 % | 24.7 % |
-| 10 | 26.3 % | 93.3 % | 31.0 % |
-| 100 | 27.0 % | 93.7 % | 35.7 % |
-| 1000 | 26.7 % | 93.7 % | 36.0 % |
+| 1 | 20.00 % | 94.00 % | 64.67 % |
+| 10 | 25.00 % | 97.00 % | 76.33 % |
+| 100 | 27.67 % | 97.00 % | 78.00 % |
+| 1000 | 27.67 % | 97.00 % | 78.00 % |
 
-Almost all of the gain happens between k = 1 and k = 10 (for gpt-4.1-mini up
-to k = 100). After that, more samples cost a lot more and change nothing
-measurable. With early stopping, a budget of k = 1000 used on average only
-74 samples per problem on AIME and 18 on GSM8K.
+In every run the only statistically significant gain is from k = 1 to k = 10
+(exact McNemar test, Holm-corrected). With early stopping, a budget of
+k = 1000 used on average 72.7 (gpt-4o-mini) and 44.2 (gpt-4.1-mini) samples
+per problem on AIME and 15.9 on GSM8K.
+
+The full statistical analysis (validation, significance tests, token usage,
+figures) is in
+[parallel-sampling-analysis](https://github.com/adam-2131/parallel-sampling-analysis).
+The `experiments*/` folders in this repository contain the earlier runs with a
+2048-token limit and the original parser; they are kept for reference and are
+not comparable with the final runs.
 
 ## Setup
 
@@ -41,28 +48,33 @@ $env:OPENAI_API_KEY="..."          # Windows PowerShell
 
 ## Running the experiments
 
+The final runs used these commands:
+
 ```bash
 # AIME, gpt-4o-mini
-python main.py --method fixed_k_majority \
+python main.py --method fixed_k_majority --max-tokens 16384 \
     --dataset-path data/aime.jsonl --model gpt-4o-mini \
-    --per-example-dir experiments
+    --per-example-dir experiments_aime_4o_16k --max-workers 48
 
 # GSM8K, gpt-4o-mini
-python main.py --method fixed_k_majority \
+python main.py --method fixed_k_majority --max-tokens 16384 \
     --dataset-path data/gsm8k.jsonl --model gpt-4o-mini \
-    --per-example-dir experiments_gsm8k
+    --per-example-dir experiments_gsm8k_16k --max-workers 32
 
 # AIME, gpt-4.1-mini
-python main.py --method fixed_k_majority \
+python main.py --method fixed_k_majority --max-tokens 16384 \
     --dataset-path data/aime.jsonl --model gpt-4.1-mini \
-    --per-example-dir experiments_aime_41mini
+    --per-example-dir experiments_aime_41mini_16k --max-workers 64
 ```
+
+Long responses need a longer request timeout, e.g.
+`$env:OPENAI_REQUEST_TIMEOUT_S="600"`.
 
 Each run writes one CSV per k value (`k_1.csv`, `k_10.csv`, ...) with the
 columns
 
 ```
-example_id,k_max,k_used,prediction,confidence,entropy,correct,runtime_seconds
+example_id,k_max,k_used,valid_votes,invalid_votes,token_limit_votes,prediction,confidence,entropy,correct,completion_tokens,runtime_seconds
 ```
 
 Main options (defaults in brackets):
@@ -76,9 +88,18 @@ Main options (defaults in brackets):
 | `--early-stop-confidence` | 0.95 | stop when the majority answer has this share of the votes |
 | `--early-stop-stability` | 50 | stop when the majority answer hasn't changed for this many samples |
 | `--early-stop-min-samples` | 10 | number of samples before either rule is checked |
+| `--early-stop-min-valid` | 10 | number of valid answers before either rule can stop sampling |
+| `--max-tokens` | 2048 | token limit per response (the final runs used 16384) |
+| `--limit` | – | only run the first N problems of the subset (pilot runs) |
 | `--max-workers` | 32 | problems processed in parallel |
 
-Temperature (0.7) and the token limit (2048) are fixed in `main.py`.
+Temperature (0.7) is fixed in `main.py`. Responses without a valid final
+answer count as samples but never move the vote towards stopping. The samples
+of one problem are drawn one after another so that early stopping can be
+checked after each response; `--max-workers` parallelises different problems.
+
+`scripts/replay_corrected.py` re-scores the earlier 2048-token runs offline
+from the response cache with the current parser (no API calls).
 
 ## Plots and statistics
 
@@ -110,8 +131,8 @@ data.py          loads a .jsonl problem set
 scripts/         plots, statistics, building the datasets
 tests/           pytest tests
 data/            aime.jsonl (933 problems), gsm8k.jsonl (1319 problems)
-experiments*/    results of the three runs
-plots*/          figures
+experiments*/    earlier 2048-token runs (reference only)
+plots*/          figures of the earlier runs
 ```
 
 ## Data
@@ -125,11 +146,13 @@ Hugging Face copy of AIME differs from it by one double space (problem 1984-1).
 ## Limitations
 
 - Only two small models from the same provider.
-- Answers are compared as text, so `025` and `25` (or `4.00` and `4`) count as
-  different. This affects one AIME problem and ten GSM8K problems at every k,
-  so it shifts the curves but doesn't change their shape.
-- Answer extraction falls back to the last integer in the response if no
-  final answer is marked, which can pick the wrong number.
+- Answer extraction is conservative: only an explicit "Final Answer:" label
+  or a `\boxed{}` counts, so a correct answer without either is scored as
+  invalid. This affected under 1 % of the final responses.
+- The AIME problems (1983–2024) were public before both models were
+  released, so training-data contamination cannot be ruled out.
+- No run without early stopping exists, so accuracy at a full k = 1000
+  budget is not measured.
 
 ## Note
 

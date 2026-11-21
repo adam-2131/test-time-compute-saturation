@@ -32,6 +32,8 @@ class ModelOutput:
     completion_tokens: int | None
     prompt_tokens: int | None
     total_tokens: int | None
+    # "length" means the response hit max_tokens; missing in older cache entries
+    finish_reason: str | None = None
 
 
 def _cache_path(request):
@@ -137,12 +139,14 @@ def call_model(
     )
 
     usage = getattr(response, "usage", None)
+    choice = response.choices[0]
 
     output = ModelOutput(
-        text=response.choices[0].message.content or "",
+        text=choice.message.content or "",
         completion_tokens=getattr(usage, "completion_tokens", None),
         prompt_tokens=getattr(usage, "prompt_tokens", None),
         total_tokens=getattr(usage, "total_tokens", None),
+        finish_reason=getattr(choice, "finish_reason", None),
     )
 
     _store_cached(request, output)

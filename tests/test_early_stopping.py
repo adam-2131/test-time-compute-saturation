@@ -95,6 +95,84 @@ class TestUnparseableAnswers:
         assert result["prediction"] is None
         assert result["correct"] is False
         assert result["k_used"] == 12
+        assert result["valid_votes"] == 0
+        assert result["invalid_votes"] == 12
+
+
+def stub_texts(monkeypatch, texts, **output_fields):
+    calls = itertools.count()
+
+    def fake(prompt, *, model, temperature, max_tokens, seed=None):
+        fields = dict(completion_tokens=10, prompt_tokens=5, total_tokens=15)
+        fields.update(output_fields)
+        return ModelOutput(text=texts[min(next(calls), len(texts) - 1)], **fields)
+
+    monkeypatch.setattr(ev, "call_model", fake)
+
+
+class TestInvalidResponsesDoNotDriveStopping:
+    def test_one_valid_answer_among_invalid_ones_does_not_stop(self, monkeypatch):
+        # confidence is 1/1 = 100 %, but only one response has an answer
+        stub_texts(monkeypatch, ["Final Answer: 7"] + ["no idea"] * 99)
+        result = run(k_max=40, early_stop_stability=10_000)
+
+        assert result["k_used"] == 40
+        assert result["confidence"] == 1.0
+        assert result["valid_votes"] == 1
+        assert result["invalid_votes"] == 39
+
+    def test_confidence_stop_waits_for_enough_valid_answers(self, monkeypatch):
+        texts = ["no idea"] * 10 + ["Final Answer: 7"] * 50
+        stub_texts(monkeypatch, texts)
+        result = run(k_max=100, early_stop_min_valid=10)
+
+        assert result["k_used"] == 20
+        assert result["valid_votes"] == 10
+
+    def test_invalid_responses_do_not_count_as_stable(self, monkeypatch):
+        texts = ["Final Answer: 7", "Final Answer: 9"] * 6 + ["no idea"] * 200
+        stub_texts(monkeypatch, texts)
+        # the majority is stable for 3 valid answers; 2 more invalid ones
+        # would have reached the window of 5 under the old rule
+        result = run(k_max=100, early_stop_stability=5, early_stop_min_valid=1)
+
+        assert result["k_used"] == 100
+        assert result["valid_votes"] == 12
+
+    def test_all_valid_answers_behave_as_before(self, monkeypatch):
+        stub(monkeypatch, ["7", "7", "9"])
+        assert run(k_max=100, early_stop_stability=3)["k_used"] == 12
+
+
+class TestTokenLimit:
+    def test_finish_reason_length_marks_a_response_as_cut_off(self, monkeypatch):
+        stub_texts(monkeypatch, ["working...\nFinal Answer: 7"], finish_reason="length")
+        result = run(k_max=1)
+
+        assert result["token_limit_votes"] == 1
+        assert result["prediction"] is None
+
+    def test_a_complete_final_answer_survives_the_token_limit(self, monkeypatch):
+        stub_texts(monkeypatch, ["working...\nFinal Answer: 7\nmore"], finish_reason="length")
+        result = run(k_max=1)
+
+        assert result["token_limit_votes"] == 1
+        assert result["prediction"] == "7"
+
+    def test_old_cache_entries_use_the_token_count(self, monkeypatch):
+        stub_texts(monkeypatch, ["working...\nFinal Answer: 7"], completion_tokens=2048)
+        assert run(k_max=1)["token_limit_votes"] == 1
+
+    def test_finish_reason_stop_is_not_cut_off(self, monkeypatch):
+        stub_texts(monkeypatch, ["Final Answer: 7"], completion_tokens=2048, finish_reason="stop")
+        result = run(k_max=1)
+
+        assert result["token_limit_votes"] == 0
+        assert result["prediction"] == "7"
+
+    def test_completion_tokens_are_summed(self, monkeypatch):
+        stub(monkeypatch, ["7"])
+        assert run(k_max=3, early_stop_min_samples=3)["completion_tokens"] == 30
 
 
 class TestOrderingAndConcurrency:
